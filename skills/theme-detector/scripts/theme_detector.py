@@ -488,8 +488,43 @@ def main():
     print("Fetching FINVIZ industry performance...", file=sys.stderr)
     raw_industries = get_industry_performance()
     if not raw_industries:
-        print("ERROR: No industry data from FINVIZ. Exiting.", file=sys.stderr)
-        sys.exit(1)
+        print(
+            "WARNING: No FINVIZ industry data available. Generating non-decision-grade empty report.",
+            file=sys.stderr,
+        )
+        metadata["data_sources"]["finviz_industries"] = 0
+        metadata["data_coverage"] = {
+            "decision_grade": False,
+            "reason": "FINVIZ industry data unavailable; theme classification skipped",
+            "component_availability": {
+                "finviz_industries": False,
+                "theme_classification": False,
+                "uptrend_data": None,
+                "etf_volume": False,
+                "stock_metrics": False,
+            },
+        }
+        sector_uptrend = fetch_sector_uptrend_data()
+        if sector_uptrend:
+            metadata["data_sources"]["uptrend_sectors"] = len(sector_uptrend)
+            metadata["data_coverage"]["component_availability"]["uptrend_data"] = True
+        else:
+            metadata["data_sources"]["uptrend_error"] = "fetch failed"
+            metadata["data_coverage"]["component_availability"]["uptrend_data"] = False
+
+        json_report = generate_json_report([], {"top": [], "bottom": []}, sector_uptrend, metadata)
+        md_report = generate_markdown_report(json_report, top_n_detail=args.top)
+        output_dir = args.output_dir
+        if not os.path.isabs(output_dir):
+            repo_root = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            )
+            output_dir = os.path.join(repo_root, output_dir)
+        paths = save_reports(json_report, md_report, output_dir)
+        print(f"  JSON:     {paths['json']}", file=sys.stderr)
+        print(f"  Markdown: {paths['markdown']}", file=sys.stderr)
+        print(json.dumps(json_report, indent=2, default=str))
+        return
 
     metadata["data_sources"]["finviz_industries"] = len(raw_industries)
     print(f"  Got {len(raw_industries)} industries", file=sys.stderr)

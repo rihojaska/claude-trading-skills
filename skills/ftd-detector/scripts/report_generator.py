@@ -42,6 +42,22 @@ def generate_markdown_report(analysis: dict, output_file: str):
         lines.append(f"**QQQ:** ${prices['qqq']:.2f}")
     lines.append("")
 
+    coverage = metadata.get("data_coverage", {})
+    if coverage:
+        lines.append("## Data Coverage")
+        lines.append("")
+        lines.append(f"**Decision-grade:** {'YES' if coverage.get('decision_grade') else 'NO'}")
+        lines.append(f"**Reason:** {coverage.get('reason', 'N/A')}")
+        lines.append("")
+        lines.append("| Symbol | History Source | Quote Source | Status |")
+        lines.append("|---|---|---|---|")
+        for symbol, row in coverage.get("symbols", {}).items():
+            lines.append(
+                f"| {symbol} | {row.get('history', 'missing')} | "
+                f"{row.get('quote', 'missing')} | {row.get('status', 'UNKNOWN')} |"
+            )
+        lines.append("")
+
     # ── Market Timing Status ─────────────────────────────────────────────
     lines.append("---")
     lines.append("")

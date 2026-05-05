@@ -35,6 +35,25 @@ def generate_markdown_report(analysis: dict, output_file: str):
     )
     lines.append("")
 
+    coverage = metadata.get("data_coverage", {})
+    if coverage:
+        lines.append("## Data Coverage")
+        lines.append("")
+        lines.append(f"**Decision-grade:** {'YES' if coverage.get('decision_grade') else 'NO'}")
+        lines.append(f"**Reason:** {coverage.get('reason', 'N/A')}")
+        lines.append("")
+        lines.append("| Component | Available |")
+        lines.append("|---|---|")
+        for component, available in coverage.get("component_availability", {}).items():
+            lines.append(f"| {component} | {'YES' if available else 'NO'} |")
+        lines.append("")
+        if coverage.get("symbol_sources"):
+            lines.append("| Symbol Data | Source |")
+            lines.append("|---|---|")
+            for key, source in sorted(coverage.get("symbol_sources", {}).items()):
+                lines.append(f"| {key} | {source} |")
+            lines.append("")
+
     # ================================================================
     # Section 1: Current Regime Assessment
     # ================================================================

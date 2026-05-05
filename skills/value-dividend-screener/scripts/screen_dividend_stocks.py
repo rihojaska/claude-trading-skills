@@ -26,6 +26,7 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -33,6 +34,70 @@ try:
 except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
+
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+from fmp_compat import fmp_get
+
+
+def _yf_dividend_history(symbol: str) -> Optional[dict]:
+    """Fetch dividend history from yfinance in legacy FMP stock_dividend shape."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+
+    try:
+        dividends = yf.Ticker(symbol).dividends
+    except Exception:
+        return None
+
+    if dividends is None or dividends.empty:
+        return None
+
+    rows = []
+    for idx, value in dividends.items():
+        dividend = float(value or 0)
+        rows.append(
+            {
+                "date": idx.date().isoformat(),
+                "label": idx.date().isoformat(),
+                "adjDividend": dividend,
+                "dividend": dividend,
+            }
+        )
+    return {"symbol": symbol, "historical": rows, "data_source": "yfinance"}
+
+
+def _yf_quote_profile(symbol: str) -> Optional[dict]:
+    """Fetch quote/profile-like candidate data from yfinance."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+
+    try:
+        ticker = yf.Ticker(symbol)
+        fast_info = getattr(ticker, "fast_info", {}) or {}
+        info = ticker.info or {}
+    except Exception:
+        return None
+
+    price = fast_info.get("last_price") or info.get("regularMarketPrice") or info.get("currentPrice")
+    if not price:
+        return None
+    return {
+        "symbol": symbol,
+        "price": float(price),
+        "marketCap": fast_info.get("market_cap") or info.get("marketCap") or 0,
+        "companyName": info.get("longName") or info.get("shortName") or symbol,
+        "name": info.get("shortName") or info.get("longName") or symbol,
+        "sector": info.get("sector", "Unknown"),
+        "industry": info.get("industry", ""),
+        "data_source": "yfinance",
+    }
 
 
 class FINVIZClient:
@@ -112,6 +177,7 @@ class FMPClient:
 
     def __init__(self, api_key: str):
         self.api_key = api_key
+        os.environ.setdefault("FMP_API_KEY", api_key)
         self.session = requests.Session()
         self.session.headers.update({"apikey": self.api_key})
         self.rate_limit_reached = False
@@ -125,36 +191,11 @@ class FMPClient:
         if params is None:
             params = {}
 
-        url = f"{self.BASE_URL}/{endpoint}"
-
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            time.sleep(0.3)  # Rate limiting: ~3 requests/second
-
-            if response.status_code == 200:
-                self.retry_count = 0  # Reset retry count on success
-                return response.json()
-            elif response.status_code == 429:
-                self.retry_count += 1
-                if self.retry_count <= 1:  # Only retry once
-                    print("WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr)
-                    time.sleep(60)
-                    return self._get(endpoint, params)
-                else:
-                    print(
-                        "ERROR: Daily API rate limit reached. Stopping analysis.", file=sys.stderr
-                    )
-                    self.rate_limit_reached = True
-                    return None
-            else:
-                print(
-                    f"ERROR: API request failed: {response.status_code} - {response.text}",
-                    file=sys.stderr,
-                )
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Request exception: {e}", file=sys.stderr)
-            return None
+        result = fmp_get(f"/api/v3/{endpoint}", params=params, timeout=30)
+        time.sleep(0.3)  # Rate limiting: ~3 requests/second
+        if result is None:
+            print(f"WARNING: FMP request failed or quota-limited: {endpoint}", file=sys.stderr)
+        return result
 
     def screen_stocks(
         self,
@@ -194,7 +235,10 @@ class FMPClient:
 
     def get_dividend_history(self, symbol: str) -> list[dict]:
         """Get dividend history"""
-        return self._get(f"historical-price-full/stock_dividend/{symbol}") or {}
+        result = self._get(f"historical-price-full/stock_dividend/{symbol}") or {}
+        if result and len(result.get("historical", [])) >= 16:
+            return result
+        return _yf_dividend_history(symbol) or result
 
     def get_company_profile(self, symbol: str) -> Optional[dict]:
         """Get company profile including sector information."""
@@ -210,6 +254,72 @@ class FMPClient:
             # Return most recent 'days' entries
             return result["historical"][:days]
         return []
+
+
+def load_symbol_universe(path: str) -> list[str]:
+    """Load symbols from a CSV or one-symbol-per-line text file."""
+    universe_path = Path(path).expanduser()
+    if not universe_path.exists():
+        print(f"ERROR: Universe file not found: {universe_path}", file=sys.stderr)
+        return []
+
+    symbols: list[str] = []
+    with universe_path.open(newline="", encoding="utf-8") as f:
+        sample = f.read(2048)
+        f.seek(0)
+        sample_lines = sample.splitlines()
+        first_line = sample_lines[0].lower() if sample_lines else ""
+        header_cells = {cell.strip() for cell in first_line.split(",")}
+        has_header = bool({"ticker", "symbol"} & header_cells)
+        if not has_header and len(sample_lines) > 1 and "," in first_line:
+            has_header = csv.Sniffer().has_header(sample)
+        if has_header:
+            reader = csv.DictReader(f)
+            for row in reader:
+                symbol = (
+                    row.get("Ticker")
+                    or row.get("ticker")
+                    or row.get("Symbol")
+                    or row.get("symbol")
+                    or next(iter(row.values()), "")
+                )
+                symbol = (symbol or "").strip()
+                if symbol:
+                    symbols.append(symbol)
+        else:
+            for line in f:
+                symbol = line.strip().split(",")[0].strip()
+                if symbol and not symbol.startswith("#"):
+                    symbols.append(symbol)
+
+    seen: set[str] = set()
+    return [s for s in symbols if not (s in seen or seen.add(s))]
+
+
+def build_candidates_from_universe(
+    symbols: list[str], client: FMPClient, max_candidates: int | None = None
+) -> list[dict]:
+    """Fetch quote/profile data for a local symbol universe."""
+    selected = symbols[:max_candidates] if max_candidates else symbols
+    candidates: list[dict] = []
+    print(f"Fetching quote and profile data for {len(selected)} local-universe symbols...", file=sys.stderr)
+    for symbol in selected:
+        quote = client._get(f"quote/{symbol}")
+        if quote and isinstance(quote, list) and len(quote) > 0:
+            stock_data = quote[0].copy()
+            profile = client.get_company_profile(symbol)
+            if profile:
+                stock_data["sector"] = profile.get("sector", "N/A")
+                stock_data["industry"] = profile.get("industry", "")
+                stock_data["companyName"] = profile.get("companyName", stock_data.get("name", ""))
+            candidates.append(stock_data)
+        else:
+            stock_data = _yf_quote_profile(symbol)
+            if stock_data:
+                candidates.append(stock_data)
+        if client.rate_limit_reached:
+            break
+    return candidates
 
 
 class RSICalculator:
@@ -758,7 +868,11 @@ class StockAnalyzer:
 
 
 def screen_value_dividend_stocks(
-    fmp_api_key: str, top_n: int = 20, finviz_symbols: Optional[set[str]] = None
+    fmp_api_key: str,
+    top_n: int = 20,
+    finviz_symbols: Optional[set[str]] = None,
+    universe_symbols: Optional[list[str]] = None,
+    max_candidates: int | None = None,
 ) -> list[dict]:
     """
     Main screening function
@@ -810,14 +924,17 @@ def screen_value_dividend_stocks(
             f"Retrieved quote and profile data for {len(candidates)} symbols from FMP",
             file=sys.stderr,
         )
-    else:
+    elif universe_symbols:
         print(
-            "Step 1: Initial screening using FMP Stock Screener (Dividend Yield >= 3.0%, P/E <= 20, P/B <= 2)...",
+            f"Step 1: Using local universe ({len(universe_symbols)} symbols)...",
             file=sys.stderr,
         )
-        print("Criteria: Div Yield >= 3.0%, Div Growth >= 4.0% CAGR", file=sys.stderr)
-        candidates = client.screen_stocks(dividend_yield_min=3.0, pe_max=20, pb_max=2)
-        print(f"Found {len(candidates)} initial candidates", file=sys.stderr)
+        candidates = build_candidates_from_universe(universe_symbols, client, max_candidates)
+        print(f"Retrieved quote and profile data for {len(candidates)} local symbols", file=sys.stderr)
+    else:
+        print("Step 1: FMP Stock Screener is unavailable on this FMP tier.", file=sys.stderr)
+        print("Use --use-finviz or --universe portfolio/watchlist.csv for screening.", file=sys.stderr)
+        candidates = []
 
     if not candidates:
         print("No stocks found matching initial criteria", file=sys.stderr)
@@ -1106,6 +1223,17 @@ Environment Variables:
     parser.add_argument(
         "--top", type=int, default=20, help="Number of top stocks to return (default: 20)"
     )
+    parser.add_argument(
+        "--universe",
+        type=str,
+        help="CSV or text file containing symbols to analyze instead of the unavailable FMP stock screener",
+    )
+    parser.add_argument(
+        "--max-candidates",
+        type=int,
+        default=None,
+        help="Maximum local-universe candidates to analyze (default: all)",
+    )
 
     args = parser.parse_args()
 
@@ -1141,17 +1269,23 @@ Environment Variables:
             sys.exit(1)
     else:
         print(f"\n{'=' * 60}", file=sys.stderr)
-        print("VALUE DIVIDEND STOCK SCREENER (FMP ONLY)", file=sys.stderr)
+        mode = "LOCAL UNIVERSE" if args.universe else "FMP STOCK-SCREENER UNAVAILABLE"
+        print(f"VALUE DIVIDEND STOCK SCREENER ({mode})", file=sys.stderr)
         print(f"{'=' * 60}\n", file=sys.stderr)
+
+    universe_symbols = load_symbol_universe(args.universe) if args.universe else None
 
     # Run detailed screening
     results = screen_value_dividend_stocks(
-        fmp_api_key, top_n=args.top, finviz_symbols=finviz_symbols
+        fmp_api_key,
+        top_n=args.top,
+        finviz_symbols=finviz_symbols,
+        universe_symbols=universe_symbols,
+        max_candidates=args.max_candidates,
     )
 
     if not results:
         print("\nNo stocks found matching all criteria.", file=sys.stderr)
-        sys.exit(1)
 
     # Add metadata
     output_data = {

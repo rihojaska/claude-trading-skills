@@ -53,6 +53,13 @@ class InstitutionalFlowTracker:
 
     def get_stock_screener(self, market_cap_min: int = 1000000000, limit: int = 100) -> list[dict]:
         """Get list of stocks meeting market cap criteria"""
+        if os.getenv("TRADERMONTY_ALLOW_FMP_PREMIUM_ENDPOINTS") != "1":
+            print(
+                "FMP stock-screener is unavailable on the current FMP tier; "
+                "set TRADERMONTY_ALLOW_FMP_PREMIUM_ENDPOINTS=1 only if this key has paid access."
+            )
+            return []
+
         url = f"{self.base_url}/stock-screener"
         params = {"marketCapMoreThan": market_cap_min, "limit": limit}
 
@@ -68,6 +75,13 @@ class InstitutionalFlowTracker:
 
     def get_institutional_holders(self, symbol: str) -> list[dict]:
         """Get institutional holders for a specific stock"""
+        if os.getenv("TRADERMONTY_ALLOW_FMP_PREMIUM_ENDPOINTS") != "1":
+            print(
+                "FMP institutional-holder is unavailable on the current FMP tier; "
+                "set TRADERMONTY_ALLOW_FMP_PREMIUM_ENDPOINTS=1 only if this key has paid access."
+            )
+            return []
+
         url = f"{self.base_url}/institutional-holder/{symbol}"
 
         try:
@@ -192,7 +206,7 @@ class InstitutionalFlowTracker:
         stocks = self.get_stock_screener(market_cap_min=min_market_cap, limit=limit)
 
         if not stocks:
-            print("No stocks found in screener")
+            print("No stocks found in screener or endpoint is blocked for this FMP tier")
             return []
 
         # Filter by sector if specified

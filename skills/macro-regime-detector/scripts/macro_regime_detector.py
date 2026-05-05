@@ -208,6 +208,15 @@ def main():
     }
 
     composite = calculate_composite_score(component_scores, data_availability)
+    missing_components = [name for name, available in data_availability.items() if not available]
+    data_coverage = {
+        "decision_grade": len(missing_components) <= 2,
+        "reason": "At least 4/6 macro components available"
+        if len(missing_components) <= 2
+        else f"Only {6 - len(missing_components)}/6 macro components available",
+        "component_availability": data_availability,
+        "symbol_sources": client.get_api_stats().get("data_sources", {}),
+    }
 
     component_results = {
         "concentration": comp1,
@@ -240,6 +249,7 @@ def main():
             "data_source": "FMP API",
             "history_days": args.days,
             "api_calls": client.get_api_stats(),
+            "data_coverage": data_coverage,
             "etfs_analyzed": REQUIRED_ETFS,
             "treasury_data_available": treasury_rates is not None,
         },

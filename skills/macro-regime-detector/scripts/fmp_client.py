@@ -16,6 +16,8 @@ Features:
 import os
 import sys
 import time
+from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -24,6 +26,122 @@ except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+from fmp_compat import fmp_get
+
+
+# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+
+
+def _stable_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=SPY&from=...&to=..."""
+    params["symbol"] = symbols_str
+    # New stable EOD endpoint ignores `timeseries`; convert to from/to range
+    # to bound the payload. Use 2x calendar days to cover N trading days
+    # (trading-day/calendar-day ratio ~252/365 ~0.69, so *2 leaves headroom).
+    days = params.pop("timeseries", None)
+    if days is not None:
+        today = date.today()
+        params["from"] = (today - timedelta(days=int(days) * 2)).isoformat()
+        params["to"] = today.isoformat()
+    return base, params
+
+
+def _v3_hist_url(base, symbols_str, params):
+    """api/v3/historical-price-full/SPY?timeseries=600"""
+    return f"{base}/{symbols_str}", params
+
+
+_FMP_ENDPOINTS = {
+    "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
+        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
+    ],
+}
+
+
+def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None):
+    """Convert stable/historical-price-eod/full flat list to v3-compatible dict.
+
+    Input  : [{"symbol": "SPY", "date": "...", "open": ..., ...}, ...]
+    Output : {"symbol": "SPY", "historical": [{"date": ..., "open": ..., ...}, ...]}
+
+    Returns the input unchanged if not a list (passthrough for v3 dict /
+    historicalStockList responses). Returns None when no row matches the
+    requested symbol; the caller will record the failure and try the next
+    endpoint.
+
+    If `limit` is provided (the original `timeseries=N` request), the
+    `historical` list is truncated to the first `limit` entries. The new
+    EOD endpoint ignores `timeseries` and returns the full available history,
+    so the caller's date-range bounding plus this truncation together preserve
+    the legacy "most-recent N rows" contract. Truncation assumes descending
+    date order, which the FMP EOD endpoint provides (verified live).
+
+    Note: empty list ``[]`` does not reach this normalizer because the caller's
+    ``if not data: continue`` falsy check handles it earlier in
+    ``_request_with_fallback``.
+    """
+    if not isinstance(data, list):
+        return data
+    if not data:
+        return None
+    norm_target = symbols_str.replace("-", ".")
+    matched_symbol = None
+    historical = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        # Be permissive: single-symbol endpoint may omit per-row "symbol".
+        # Treat missing symbol as belonging to the requested symbols_str.
+        row_sym = row.get("symbol") or symbols_str
+        if row_sym.replace("-", ".") != norm_target:
+            continue
+        matched_symbol = matched_symbol or row_sym
+        historical.append({k: v for k, v in row.items() if k != "symbol"})
+    if not historical:
+        return None
+    if limit is not None and limit > 0:
+        historical = historical[:limit]
+    return {"symbol": matched_symbol or symbols_str, "historical": historical}
+
+
+def _yf_history(symbol: str, days: int) -> Optional[dict]:
+    """Fetch daily OHLCV from yfinance and normalize to FMP historical shape."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None
+
+    try:
+        period_days = max(int(days * 2), 10)
+        hist = yf.Ticker(symbol).history(period=f"{period_days}d", auto_adjust=False)
+    except Exception:
+        return None
+
+    if hist is None or hist.empty:
+        return None
+
+    rows = []
+    for idx, row in hist.tail(days).iloc[::-1].iterrows():
+        rows.append(
+            {
+                "date": idx.date().isoformat(),
+                "open": float(row.get("Open", 0) or 0),
+                "high": float(row.get("High", 0) or 0),
+                "low": float(row.get("Low", 0) or 0),
+                "close": float(row.get("Close", 0) or 0),
+                "adjClose": float(row.get("Adj Close", row.get("Close", 0)) or 0),
+                "volume": int(row.get("Volume", 0) or 0),
+            }
+        )
+    if not rows:
+        return None
+    return {"symbol": symbol, "historical": rows, "data_source": "yfinance"}
+
 
 class FMPClient:
     """Client for Financial Modeling Prep API with rate limiting and caching"""
@@ -31,6 +149,7 @@ class FMPClient:
     BASE_URL = "https://financialmodelingprep.com/api/v3"
     STABLE_URL = "https://financialmodelingprep.com/stable"
     RATE_LIMIT_DELAY = 0.3  # 300ms between requests
+    _ENDPOINT_FAILURE_THRESHOLD = 3
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
@@ -47,8 +166,13 @@ class FMPClient:
         self.retry_count = 0
         self.max_retries = 1
         self.api_calls_made = 0
+        self._endpoint_failures: dict[str, int] = {}
+        self._disabled_endpoints: set[str] = set()
+        self.data_sources: dict[str, str] = {}
 
-    def _rate_limited_get(self, url: str, params: Optional[dict] = None) -> Optional[dict]:
+    def _rate_limited_get(
+        self, url: str, params: Optional[dict] = None, quiet: bool = False
+    ) -> Optional[dict]:
         if self.rate_limit_reached:
             return None
 
@@ -59,33 +183,76 @@ class FMPClient:
         if elapsed < self.RATE_LIMIT_DELAY:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            self.last_call_time = time.time()
-            self.api_calls_made += 1
+        data = fmp_get(url, params=params, timeout=30, max_retries_per_key=1)
+        self.last_call_time = time.time()
+        self.api_calls_made += 1
+        if data is None and not quiet:
+            print(f"ERROR: FMP request failed or quota-limited: {url}", file=sys.stderr)
+        return data
 
-            if response.status_code == 200:
-                self.retry_count = 0
-                return response.json()
-            elif response.status_code == 429:
-                self.retry_count += 1
-                if self.retry_count <= self.max_retries:
-                    print("WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr)
-                    time.sleep(60)
-                    return self._rate_limited_get(url, params)
-                else:
-                    print("ERROR: Daily API rate limit reached.", file=sys.stderr)
-                    self.rate_limit_reached = True
-                    return None
-            else:
-                print(
-                    f"ERROR: API request failed: {response.status_code} - {response.text[:200]}",
-                    file=sys.stderr,
-                )
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Request exception: {e}", file=sys.stderr)
-            return None
+    def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
+        """Try stable endpoint first, fall back to v3 for legacy users."""
+        params = dict(extra_params) if extra_params else {}
+        endpoints = _FMP_ENDPOINTS[endpoint_key]
+        is_single = "," not in symbols_str
+
+        for i, (base_url, url_builder) in enumerate(endpoints):
+            if base_url in self._disabled_endpoints:
+                continue
+            url, final_params = url_builder(base_url, symbols_str, dict(params))
+            is_last = i == len(endpoints) - 1
+            data = self._rate_limited_get(url, final_params, quiet=not is_last)
+            if not data:
+                self._record_endpoint_failure(base_url)
+                continue
+
+            # Normalize new stable EOD flat-list shape to v3-compatible dict.
+            # No-op for v3 dict / historicalStockList responses.
+            # `timeseries` (original request) is passed as `limit` so the
+            # EOD endpoint's full-history response is truncated to the
+            # legacy "most-recent N rows" contract.
+            if endpoint_key == "historical":
+                limit = params.get("timeseries") if isinstance(params, dict) else None
+                data = _normalize_eod_flat_list(data, symbols_str, limit=limit)
+                if not data:
+                    self._record_endpoint_failure(base_url)
+                    continue
+
+            valid = True
+            if endpoint_key == "historical":
+                if not isinstance(data, dict):
+                    valid = False
+                elif "historicalStockList" in data:
+                    norm = symbols_str.replace("-", ".")
+                    found = None
+                    for entry in data["historicalStockList"]:
+                        if entry.get("symbol", "").replace("-", ".") == norm:
+                            found = {
+                                "symbol": entry.get("symbol"),
+                                "historical": entry.get("historical", []),
+                            }
+                            break
+                    if found:
+                        self._endpoint_failures[base_url] = 0
+                        return found
+                    valid = False
+                elif "historical" not in data:
+                    valid = False
+                elif is_single and data.get("symbol"):
+                    if data["symbol"].replace("-", ".") != symbols_str.replace("-", "."):
+                        valid = False
+
+            if valid:
+                self._endpoint_failures[base_url] = 0
+                return data
+            self._record_endpoint_failure(base_url)
+        return None
+
+    def _record_endpoint_failure(self, base_url: str) -> None:
+        failures = self._endpoint_failures.get(base_url, 0) + 1
+        self._endpoint_failures[base_url] = failures
+        if failures >= self._ENDPOINT_FAILURE_THRESHOLD:
+            self._disabled_endpoints.add(base_url)
 
     def get_historical_prices(self, symbol: str, days: int = 600) -> Optional[dict]:
         """Fetch historical daily OHLCV data"""
@@ -93,9 +260,14 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        url = f"{self.BASE_URL}/historical-price-full/{symbol}"
-        params = {"timeseries": days}
-        data = self._rate_limited_get(url, params)
+        data = self._request_with_fallback("historical", symbol, {"timeseries": days})
+        if not data:
+            data = _yf_history(symbol, days)
+            if data:
+                self.data_sources[f"historical:{symbol}"] = "yfinance"
+        else:
+            data["data_source"] = data.get("data_source", "fmp")
+            self.data_sources[f"historical:{symbol}"] = data["data_source"]
         if data:
             self.cache[cache_key] = data
         return data
@@ -133,4 +305,5 @@ class FMPClient:
             "cache_entries": len(self.cache),
             "api_calls_made": self.api_calls_made,
             "rate_limit_reached": self.rate_limit_reached,
+            "data_sources": self.data_sources,
         }

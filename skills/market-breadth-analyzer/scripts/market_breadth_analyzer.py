@@ -75,6 +75,7 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
     print("Market Breadth Analyzer")

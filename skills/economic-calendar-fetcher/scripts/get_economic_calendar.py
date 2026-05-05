@@ -8,11 +8,18 @@ import argparse
 import json
 import os
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
+
+SKILL_DIR = Path(__file__).resolve().parents[3]
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
+
+try:
+    from fmp_compat import fmp_get
+except Exception:  # pragma: no cover - fallback handled at runtime
+    fmp_get = None
 
 
 def get_api_key() -> Optional[str]:
@@ -44,38 +51,29 @@ def fetch_economic_calendar(from_date: str, to_date: str, api_key: str) -> list[
         urllib.error.HTTPError: If API request fails
         ValueError: If response is invalid
     """
-    base_url = "https://financialmodelingprep.com/stable/economics-calendar"
+    if fmp_get is None:
+        raise ValueError("fmp_compat.py is required for economic-calendar fallback handling")
 
-    # Build query parameters (stable API uses apikey as query param)
-    params = {"from": from_date, "to": to_date, "apikey": api_key}
+    # Correct stable endpoint is economic-calendar (singular economic), not economics-calendar.
+    data = fmp_get("/stable/economic-calendar", {"from": from_date, "to": to_date}, timeout=30)
+    if data is None and api_key:
+        # If called with an explicit key and no environment key is configured,
+        # temporarily expose it so fmp_compat can still handle the request.
+        old_key = os.environ.get("FMP_API_KEY")
+        os.environ["FMP_API_KEY"] = api_key
+        try:
+            data = fmp_get("/stable/economic-calendar", {"from": from_date, "to": to_date}, timeout=30)
+        finally:
+            if old_key is None:
+                os.environ.pop("FMP_API_KEY", None)
+            else:
+                os.environ["FMP_API_KEY"] = old_key
 
-    # Construct URL with parameters
-    url = f"{base_url}?{urllib.parse.urlencode(params)}"
-
-    try:
-        # Make API request
-        request = urllib.request.Request(url)
-        with urllib.request.urlopen(request) as response:
-            if response.status != 200:
-                raise ValueError(f"API returned status code {response.status}")
-
-            data = json.loads(response.read().decode("utf-8"))
-
-            if not isinstance(data, list):
-                raise ValueError(f"Unexpected API response format: {type(data)}")
-
-            return data
-
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8") if e.fp else "No error details"
-        # Stable API returns 404 with [] when no events exist
-        if e.code == 404 and error_body.strip() == "[]":
-            return []
-        raise urllib.error.HTTPError(
-            e.url, e.code, f"FMP API error: {e.reason}. Details: {error_body}", e.hdrs, e.fp
-        )
-    except urllib.error.URLError as e:
-        raise ValueError(f"Network error: {e.reason}")
+    if data is None:
+        raise ValueError("FMP economic-calendar request failed; keys may be exhausted")
+    if not isinstance(data, list):
+        raise ValueError(f"Unexpected API response format: {type(data)}")
+    return data
 
 
 def validate_date_range(from_date: str, to_date: str) -> None:
@@ -245,6 +243,7 @@ Examples:
 
         # Write output
         if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
             with open(args.output, "w", encoding="utf-8") as f:
                 f.write(output)
             print(f"Output written to {args.output}", file=sys.stderr)

@@ -277,6 +277,7 @@ def _compute_deltas(current_scores: dict[str, float], previous_report: Optional[
 
 def main():
     args = parse_arguments()
+    os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
     print("Market Top Detector")
@@ -494,6 +495,15 @@ def main():
     }
 
     composite = calculate_composite_score(component_scores, data_availability)
+    missing_components = [name for name, available in data_availability.items() if not available]
+    data_coverage = {
+        "decision_grade": len(missing_components) <= 1,
+        "reason": "All or nearly all components available"
+        if len(missing_components) <= 1
+        else f"Missing/non-decision-grade components: {', '.join(missing_components)}",
+        "component_availability": data_availability,
+        "symbol_sources": client.get_api_stats().get("data_sources", {}),
+    }
 
     print(f"  Composite Score: {composite['composite_score']}/100")
     print(f"  Risk Zone: {composite['zone']}")
@@ -567,6 +577,7 @@ def main():
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "data_mode": "FMP API + CLI inputs",
             "api_calls": client.get_api_stats(),
+            "data_coverage": data_coverage,
             "cli_inputs": {
                 "breadth_200dma": effective_breadth_200dma,
                 "breadth_200dma_source": breadth_source,

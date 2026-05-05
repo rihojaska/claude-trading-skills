@@ -21,9 +21,17 @@ import json
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-import requests
+SKILL_DIR = Path(__file__).resolve().parents[3]
+if str(SKILL_DIR) not in sys.path:
+    sys.path.insert(0, str(SKILL_DIR))
+
+try:
+    from fmp_compat import fmp_get
+except Exception:  # pragma: no cover - handled at runtime
+    fmp_get = None
 
 
 class FMPEarningsCalendar:
@@ -43,6 +51,8 @@ class FMPEarningsCalendar:
         """
         self.api_key = api_key
         self.us_only = us_only
+        if api_key and not os.environ.get("FMP_API_KEY"):
+            os.environ["FMP_API_KEY"] = api_key
 
     def fetch_earnings_calendar(self, start_date: str, end_date: str) -> Optional[list[dict]]:
         """
@@ -55,49 +65,23 @@ class FMPEarningsCalendar:
         Returns:
             List of earnings announcements or None on error
         """
-        url = f"{self.BASE_URL}/earnings-calendar"
-        params = {"from": start_date, "to": end_date, "apikey": self.api_key}
-
-        try:
-            response = requests.get(
-                url, params=params, timeout=30
-            )
-
-            if response.status_code == 401:
-                print("❌ ERROR: Invalid API key", file=sys.stderr)
-                print(
-                    "Get free API key: https://site.financialmodelingprep.com/developer/docs",
-                    file=sys.stderr,
-                )
-                return None
-
-            if response.status_code == 429:
-                print("❌ ERROR: Rate limit exceeded", file=sys.stderr)
-                print("Free tier: 250 calls/day. Consider upgrading.", file=sys.stderr)
-                return None
-
-            response.raise_for_status()
-            data = response.json()
-
-            # Check if response is error message
-            if isinstance(data, dict) and "Error Message" in data:
-                print(f"❌ API Error: {data['Error Message']}", file=sys.stderr)
-                return None
-
-            print(f"✓ Retrieved {len(data)} earnings announcements", file=sys.stderr)
-            return data
-
-        except requests.exceptions.Timeout:
-            print("❌ ERROR: Request timeout. Please try again.", file=sys.stderr)
+        if fmp_get is None:
+            print("❌ ERROR: fmp_compat.py is required for FMP failover", file=sys.stderr)
             return None
 
-        except requests.exceptions.ConnectionError:
-            print("❌ ERROR: Connection error. Check your internet connection.", file=sys.stderr)
+        data = fmp_get("/stable/earnings-calendar", {"from": start_date, "to": end_date}, timeout=30)
+        if data is None:
+            print("❌ ERROR: FMP earnings-calendar request failed; keys may be exhausted", file=sys.stderr)
+            return None
+        if isinstance(data, dict) and "Error Message" in data:
+            print(f"❌ API Error: {data['Error Message']}", file=sys.stderr)
+            return None
+        if not isinstance(data, list):
+            print(f"❌ ERROR: Unexpected API response format: {type(data)}", file=sys.stderr)
             return None
 
-        except Exception as e:
-            print(f"❌ ERROR: Unexpected error: {str(e)}", file=sys.stderr)
-            return None
+        print(f"✓ Retrieved {len(data)} earnings announcements", file=sys.stderr)
+        return data
 
     def fetch_company_profiles(self, symbols: list[str]) -> dict[str, dict]:
         """
@@ -114,26 +98,17 @@ class FMPEarningsCalendar:
         print(f"✓ Fetching profiles for {len(symbols)} companies...", file=sys.stderr)
 
         for i, symbol in enumerate(symbols):
-            url = f"{self.BASE_URL}/profile"
-            params = {"symbol": symbol, "apikey": self.api_key}
-
-            try:
-                response = requests.get(url, params=params, timeout=30)
-                response.raise_for_status()
-
-                data = response.json()
-                if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-                    profiles[data[0].get("symbol")] = data[0]
-
-                if (i + 1) % 50 == 0:
-                    print(f"  ✓ Fetched {i + 1}/{len(symbols)} profiles", file=sys.stderr)
-
-            except Exception as e:
+            data = fmp_get("/stable/profile", {"symbol": symbol}, timeout=30) if fmp_get else None
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
+                profiles[data[0].get("symbol")] = data[0]
+            else:
                 print(
-                    f"  ⚠️  Warning: Failed to fetch profile for {symbol}: {str(e)}",
+                    f"  ⚠️  Warning: Failed to fetch profile for {symbol}",
                     file=sys.stderr,
                 )
-                continue
+
+            if (i + 1) % 50 == 0:
+                print(f"  ✓ Fetched {i + 1}/{len(symbols)} profiles", file=sys.stderr)
 
         print(f"✓ Retrieved {len(profiles)} company profiles", file=sys.stderr)
         return profiles

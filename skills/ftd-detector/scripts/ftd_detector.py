@@ -45,6 +45,7 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
     print("FTD Detector - Follow-Through Day Bottom Confirmation")
@@ -106,6 +107,26 @@ def main():
         print("WARN - Using historical close as current price")
 
     print()
+
+    data_sources = client.get_api_stats().get("data_sources", {})
+    data_coverage = {
+        "decision_grade": bool(sp500_history and qqq_history),
+        "reason": "S&P 500 and QQQ data available"
+        if sp500_history and qqq_history
+        else "QQQ/NASDAQ confirmation unavailable; S&P-only FTD output is degraded",
+        "symbols": {
+            "^GSPC": {
+                "history": data_sources.get("historical:^GSPC", "missing"),
+                "quote": data_sources.get("quote:^GSPC", "missing") if sp500_quote else "historical_close",
+                "status": "OK" if sp500_history else "FAILED",
+            },
+            "QQQ": {
+                "history": data_sources.get("historical:QQQ", "missing"),
+                "quote": data_sources.get("quote:QQQ", "missing") if qqq_quote else "historical_close",
+                "status": "OK" if qqq_history else "FAILED",
+            },
+        },
+    }
 
     # ========================================================================
     # Step 2: Run State Machine (Rally Tracker)
@@ -192,6 +213,7 @@ def main():
         "metadata": {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "api_calls": client.get_api_stats(),
+            "data_coverage": data_coverage,
             "index_prices": {
                 "sp500": sp500_quote.get("price", 0)
                 if sp500_quote
