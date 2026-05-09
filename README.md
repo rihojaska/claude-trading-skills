@@ -1,14 +1,73 @@
 # Claude Trading Skills
 
-Curated Claude skills for equity investors and traders. Each skill bundles prompts, knowledge, and optional helper scripts so Claude can assist with systematic backtesting, market analysis, technical charting, economic calendar monitoring, and US stock research. The repository packages skills for both Claude's web app and Claude Code workflows.
+Claude Trading Skills started as a personal project to use AI to improve my own trading process.
+
+Claude Trading Skills is a Claude Skills-based trading workflow toolkit for time-constrained individual investors.
+
+It is designed for investors who use long-term investing, ETFs, and dividend stocks as their core, while using disciplined swing trading as a satellite strategy when market conditions are favorable.
+
+The goal is not to outsource buy/sell decisions to AI. The goal is to structure market review, risk management, trade planning, journaling, and continuous improvement. It is open source because the workflows, checklists, and review habits behind better trading decisions can improve through shared practice.
+
+This is not a signal service or a promise of profitability. It is a toolkit for traders who want to build a better decision process.
+
+The project follows a **first for self, open for others** stance: it is built first as a practical workflow the author uses, then shared openly for others who face similar constraints.
 
 📖 **Documentation site:** <https://tradermonty.github.io/claude-trading-skills/>
 
+**Project vision:** [`PROJECT_VISION.md`](PROJECT_VISION.md)
+
 日本語版READMEは[`README.ja.md`](README.ja.md)をご覧ください。
 
+## Disclaimer
+
+This repository is for educational, research, and process-improvement purposes only. It is not financial advice, investment advisory service, tax advice, legal advice, a signal service, or a broker execution platform. Trading and investing involve risk, including loss of principal. Past performance, backtests, screens, reports, and AI-generated analysis do not guarantee future results. All trading decisions, position sizing, tax/regulatory compliance, and broker usage are the user's responsibility.
+
+The project is provided under the MIT License, **AS IS, WITHOUT WARRANTY**.
+
+## Who This Is For
+
+This repository is designed for:
+
+- Time-constrained individual investors
+- Long-term investors who also want disciplined swing-trading upside
+- Dividend and ETF investors who want structured portfolio review
+- Traders who want to manage risk before finding trade candidates
+- Investors who want to journal and improve their decision process
+
+It is not designed for fully automated trading, signal outsourcing, or short-term scalping.
+
+## Recommended Starting Path
+
+If you are new to this repository, start with the Core + Satellite workflow:
+
+1. **Core Portfolio Weekly**
+   - Review long-term holdings, dividend stocks, ETFs, and portfolio concentration.
+2. **Market Regime Daily**
+   - Check whether current market conditions allow new risk.
+3. **Swing Opportunity Daily**
+   - Look for swing trade candidates only when market conditions are favorable.
+4. **Trade Memory Loop**
+   - Record the thesis, entry plan, result, and lessons learned.
+5. **Monthly Performance Review**
+   - Review what worked, what failed, and which rules should change.
+
+## Choose Your Starting Point
+
+| Goal | Start Here |
+| --- | --- |
+| I want a 15-minute daily market check | Market Regime Daily |
+| I want to review my long-term portfolio | Core Portfolio Weekly |
+| I want to find swing candidates | Swing Opportunity Daily |
+| I want to improve my trading process | Trade Memory Loop |
+| I want to research new strategies | Strategy Research |
+
 ## Repository Layout
-- `<skill-name>/` – Source folder for each trading skill. Contains `SKILL.md`, reference material, and any helper scripts.
+- `skills/<skill-name>/` – Source folder for each trading skill. Contains `SKILL.md`, reference material, and any helper scripts.
 - `skill-packages/` – Pre-built `.skill` archives ready to upload to Claude's web app **Skills** tab.
+- `docs/` – Documentation site content and generated skill pages.
+- `scripts/` – Repository-level automation and maintenance scripts.
+- `skillsets/` – Planned skillset manifests for bundled workflows.
+- `workflows/` – Planned workflow manifests for operational routines.
 
 ## Getting Started
 ### Use with Claude Web App
@@ -23,7 +82,23 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
 
 > Tip: The source folders and ZIPs contain identical content. Edit a source folder if you want to customize a skill, then re-zip it before uploading to the web app.
 
-## Skill Catalog
+## Core Skill Areas
+
+This repository contains skills across the following areas:
+
+| Area | Example Skills |
+| --- | --- |
+| Market Regime | `market-breadth-analyzer`, `uptrend-analyzer`, `exposure-coach` |
+| Core Portfolio | `portfolio-manager`, `value-dividend-screener`, `kanchi-dividend-sop` |
+| Swing Opportunities | `vcp-screener`, `canslim-screener`, `breakout-trade-planner` |
+| Trade Planning | `position-sizer`, `technical-analyst` |
+| Trade Memory | `trader-memory-core`, `signal-postmortem` |
+| Strategy Research | `backtest-expert`, `edge-pipeline-orchestrator` |
+| Advanced Satellite | `parabolic-short-trade-planner`, `earnings-trade-analyzer`, `options-strategy-advisor` |
+
+The detailed catalog below is retained for quick reference. For a more navigable version, use the documentation site.
+
+## Detailed Skill Catalog
 
 ### Market Analysis & Research
 
@@ -120,7 +195,7 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
 - **Scenario Analyzer** (`scenario-analyzer`)
   - Analyzes news headlines to build 18-month scenario projections with sector impacts and stock picks.
   - Dual-agent architecture: scenario-analyst for primary analysis, strategy-reviewer for second opinion.
-  - Generates comprehensive reports including 1st/2nd/3rd order effects, recommended tickers, and critical review.
+  - Generates comprehensive reports including 1st/2nd/3rd order effects, candidate tickers, and critical review.
   - No API key required - uses WebSearch for news gathering.
 
 - **Backtest Expert** (`backtest-expert`)
@@ -154,17 +229,25 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
 - **Portfolio Manager** (`portfolio-manager`)
   - Comprehensive portfolio analysis and management with Alpaca MCP Server integration for real-time holdings data.
   - Multi-dimensional analysis: Asset allocation, sector diversification, risk metrics (beta, volatility, drawdown), and performance review.
-  - Position-level evaluation with HOLD/ADD/TRIM/SELL recommendations based on thesis validation and valuation.
-  - Generates detailed rebalancing plans with specific actions to optimize portfolio allocation toward target models.
+  - Position-level review flags such as HOLD/ADD/TRIM/SELL candidates for user review based on thesis validation and valuation.
+  - Generates detailed rebalancing review plans so the user can decide manually which actions, if any, to take.
   - Supports model portfolios (Conservative/Moderate/Growth/Aggressive) for benchmark comparison.
   - Requires Alpaca brokerage account (paper or live) and configured Alpaca MCP Server; manual data entry also supported.
 
 - **Position Sizer** (`position-sizer`)
   - Calculates risk-based position sizes for long stock trades using Fixed Fractional, ATR-based, and Kelly Criterion methods.
   - Applies portfolio constraints (max position %, max sector %) and identifies binding constraints.
-  - Two output modes: "shares" mode (with entry/stop) returns final recommended share count; "budget" mode (Kelly only) returns recommended risk budget.
-  - Generates JSON + markdown reports with calculation details, constraint analysis, and final recommendations.
+  - Two output modes: "shares" mode (with entry/stop) returns a calculated share-count candidate; "budget" mode (Kelly only) returns a risk-budget candidate.
+  - Generates JSON + markdown reports with calculation details, constraint analysis, and review notes.
   - No API key required — pure calculation, works offline.
+
+- **Parabolic Short Trade Planner** (`parabolic-short-trade-planner`)
+  - Daily screener for Qullamaggie-style Parabolic Short candidates (5-factor weighted score: MA Extension 30% / Acceleration 25% / Volume Climax 20% / Range Expansion 15% / Liquidity 10%) with mode-aware invalidation (`safe_largecap` vs `classic_qm`).
+  - Pre-market plan generator emits three conditional triggers per candidate (5-min ORL break, first red 5-min, VWAP fail) with `entry_hint` / `stop_hint` formula strings — no baked-in shares; Phase 3 evaluates `shares_formula` at trigger fire.
+  - Phase 3 intraday trigger monitor (`monitor_intraday_trigger.py`) — one-shot evaluator that fetches 5-min bars (Alpaca live or fixture), walks per-trigger FSM (ORL: 3-state, First Red: 4-state with same-bar invalidation tie-break, VWAP fail: 6-state), and writes `intraday_monitor` JSON with concrete `entry_actual` / `stop_actual` / `shares_actual` when triggered. Replay-deterministic (idempotent across re-runs); `triggered` is non-terminal so post-trigger reclaims still flip to `invalidated`. Wrap in `watch -n 60` or 5-min cron.
+  - Broker-agnostic short-inventory adapter; Alpaca implementation is `requests`-direct (no SDK), encoding the ETB-only short policy and surfacing HTB names as `borrow_inventory_unavailable` → `plan_status: watch_only`.
+  - SEC Rule 201 (SSR) state tracker that inherits `prior_close` from the screener output (regular-session close, not aftermarket) and persists per-symbol state for next-day carryover.
+  - Manual confirmation reasons split into `blocking_manual_reasons` (HTB borrow, SSR active, premarket high/low unavailable) vs `advisory_manual_reasons` (`manual_locate_required` is always advisory). FMP API required; Alpaca required for Phase 3 live data (paper account works), optional for Phase 2 borrow checks.
 
 - **Edge Candidate Agent** (`edge-candidate-agent`)
   - Converts daily market observations into reproducible research tickets and exports Phase I-compatible candidate specs for `trade-strategy-pipeline`.
@@ -221,7 +304,7 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
 - **Exposure Coach** (`exposure-coach`)
   - Synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, sector-analyst, and institutional-flow-tracker into a unified exposure decision.
   - Answers the core question: "How much capital should I commit to equities right now?" before any individual stock analysis.
-  - Generates a one-page Market Posture summary with exposure ceiling (0-100%), growth-vs-value bias, participation breadth assessment, and actionable recommendation (NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY).
+  - Generates a one-page Market Posture summary with exposure ceiling (0-100%), growth-vs-value bias, participation breadth assessment, and a posture review flag (NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY).
   - Accepts partial inputs — missing upstream files reduce confidence level but do not block execution.
   - FMP API key optional (needed only when institutional-flow-tracker data is included).
 
@@ -238,6 +321,13 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
 - **Market Top Detector** (`market-top-detector`)
   - Detects market top probability using O'Neil Distribution Days, Minervini Leading Stock Deterioration, and Monty Defensive Rotation.
   - 6-component tactical timing system for identifying distribution and topping patterns.
+
+- **IBD Distribution Day Monitor** (`ibd-distribution-day-monitor`)
+  - Daily IBD-style Distribution Day detection for QQQ/SPY (close down at least 0.2% on higher volume) with 25-session expiration and 5% invalidation.
+  - Tracks active records with `age_sessions` and counts `d5/d15/d25` clusters for risk classification (NORMAL/CAUTION/HIGH/SEVERE).
+  - Emits TQQQ/QQQ exposure review flags (TQQQ cuts faster due to 3x leverage) and trailing stop reference levels.
+  - Complementary to Market Top Detector: this skill is single-component, ETF-direct, and TQQQ-aware while Market Top Detector is a 6-component composite.
+  - FMP API required.
 
 - **Downtrend Duration Analyzer** (`downtrend-duration-analyzer`)
   - Analyzes historical downtrend durations (peak-to-trough) and generates interactive HTML histograms segmented by sector and market cap.
@@ -281,18 +371,15 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
   - Multi-stage filtering: Trend Template → VCP Base Detection → Contraction Analysis → Pivot Point Calculation.
   - FMP API required (free tier sufficient for default screening of top 100 candidates).
 
-- **CANSLIM Stock Screener** (`canslim-screener`) - **Phase 2**
+- **CANSLIM Stock Screener** (`canslim-screener`) - **Phase 3.1**
   - Screens US stocks using William O'Neil's proven CANSLIM growth stock methodology for identifying multi-bagger candidates.
-  - **Phase 2** implements 6 of 7 components (80% coverage): C (Current Earnings), A (Annual Growth), N (Newness/New Highs), **S (Supply/Demand)**, **I (Institutional Sponsorship)**, M (Market Direction).
-  - Composite scoring (0-100) with weighted components: C 19%, A 25%, N 19%, **S 19%**, **I 13%**, M 6% (renormalized for 6 components).
-  - **NEW**: Volume-based accumulation/distribution analysis (S component) - detects institutional buying patterns via up-day vs down-day volume ratios.
-  - **NEW**: Institutional ownership tracking (I component) - analyzes holder count + ownership % with **automatic Finviz fallback** when FMP data incomplete.
-  - **Finviz integration**: Free web scraping for institutional data (beautifulsoup4), improves I component accuracy from 35/100 to 60-100/100.
-  - Interpretation bands: Exceptional+ (90-100), Exceptional (80-89), Strong (70-79), Above Average (60-69).
-  - Bear market protection: M component gates all buy recommendations (M=0 triggers "raise cash" warning).
-  - FMP API + Finviz integration: Free tier sufficient for 40 stocks (~1 minute 40 seconds execution time).
-  - Comprehensive knowledge base: O'Neil's methodology (now includes S and I), scoring formulas, interpretation guide, portfolio construction rules.
-  - Future Phase 3 will add L (Leadership/RS Rank) component for full 7-component CANSLIM (100% coverage).
+  - **Phase 3.1** implements all 7 components (100% coverage) with **multi-period weighted Relative Strength**: C (Current Earnings), A (Annual Growth), N (Newness/New Highs), S (Supply/Demand), **L (Leadership / multi-period RS)**, I (Institutional Sponsorship), M (Market Direction).
+  - L component uses 3m / 6m / 12m weighted RS (`0.40 × rel_3m + 0.30 × rel_6m + 0.30 × rel_12m`) vs configurable benchmark (`--rs-benchmark`, default `^GSPC`).
+  - Composite scoring (0-100) with O'Neil's original weights: C 15%, A 20%, N 15%, S 15%, **L 20%**, I 10%, M 5%.
+  - Volume-based accumulation/distribution analysis (S component) and institutional ownership tracking (I component) with **automatic Finviz fallback**.
+  - Bear market protection: M component gates long-entry consideration (M=0 triggers "raise cash" warning).
+  - `--disable-rs` flag skips L for API budget savings (L fixed at neutral 50).
+  - JSON output now includes RS-specific fields: `rs_rating`, `rs_rank_percentile`, `rs_3m_return` / `rs_6m_return` / `rs_12m_return`, `rs_benchmark`, `rs_benchmark_relative_return`, `rs_component_score`, `benchmark_52w_performance`. Markdown adds a Summary Table for quick scanning. Schema version `3.1`.
 
 - **Value Dividend Screener** (`value-dividend-screener`)
   - Screens US stocks for high-quality dividend opportunities using Financial Modeling Prep (FMP) API.
@@ -344,7 +431,9 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
   - Includes 14 pre-built screening recipes (high dividend value, small-cap growth, oversold large-caps, breakout candidates, AI/theme investing, etc.).
   - No API key required for basic use (public FinViz screener). FINVIZ Elite optional for enhanced features.
 
-## Workflow Examples
+## Additional Workflow Examples
+
+The main Core + Satellite starting path is described above. The examples below show additional ways to compose skills, including advanced satellite and contributor workflows.
 
 ### Daily Market Monitoring
 1. Use **Economic Calendar Fetcher** to check today's high-impact events (FOMC, NFP, CPI releases)
@@ -401,9 +490,9 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
 ### Portfolio Review & Rebalancing
 1. Use **Portfolio Manager** to fetch current holdings via Alpaca MCP and analyze portfolio health
 2. Review asset allocation, sector diversification, and risk metrics (beta, volatility, concentration)
-3. Evaluate position-level recommendations (HOLD/ADD/TRIM/SELL) based on thesis validation
+3. Review position-level flags (HOLD/ADD/TRIM/SELL candidates) based on thesis validation
 4. Use **Market Environment Analysis** and **US Market Bubble Detector** to assess macro conditions
-5. Execute rebalancing plan with specific buy/sell actions to optimize allocation
+5. Review a rebalancing plan and decide manually which actions, if any, to take
 
 ### Statistical Arbitrage Opportunities
 1. Use **Pair Trade Screener** to identify cointegrated stock pairs within sectors
@@ -441,6 +530,8 @@ Curated Claude skills for equity investors and traders. Each skill bundles promp
   - No API key required.
 
 ## Skill Self-Improvement Loop
+
+This section is contributor-oriented. New users can skip it and start with the Core + Satellite path above.
 
 An automated pipeline that continuously reviews and improves skill quality. A daily `launchd` job picks one skill, scores it with the dual-axis reviewer, and if the score is below 90/100, invokes `claude -p` to apply improvements and open a PR.
 
@@ -494,6 +585,8 @@ launchctl start com.trade-analysis.skill-improvement
 | `reports/skill-improvement-log/` | Daily summary reports |
 
 ## Skill Auto-Generation Pipeline
+
+This section is contributor-oriented. It describes repository maintenance automation, not a required trading workflow.
 
 An automated pipeline that mines session logs for skill ideas (weekly) and designs, reviews, and creates new skills as PRs (daily). Works alongside the Self-Improvement Loop to continuously expand the skill catalog.
 
@@ -575,9 +668,11 @@ Several skills require API keys for data access:
 | **Pair Trade Screener** | ✅ Required | ❌ Not used | ❌ Not used | Statistical arbitrage analysis |
 | **Options Strategy Advisor** | 🟡 Optional | ❌ Not used | ❌ Not used | FMP for stock data; theoretical pricing works without |
 | **Portfolio Manager** | ❌ Not used | ❌ Not used | ✅ Required | Real-time holdings via Alpaca MCP |
-| **CANSLIM Stock Screener** | ✅ Required | ❌ Not used | ❌ Not used | Phase 2 (6 components); free tier sufficient; Finviz web scraping for institutional data |
+| **CANSLIM Stock Screener** | ✅ Required | ❌ Not used | ❌ Not used | Phase 3.1 (7 components, multi-period RS); free tier sufficient for 35 stocks; Finviz web scraping for institutional data |
 | **VCP Screener** | ✅ Required | ❌ Not used | ❌ Not used | Stage 2 + VCP pattern screening; free tier sufficient |
+| **Parabolic Short Trade Planner** | ✅ Required | ❌ Not used | ✅ Phase 3 / 🟡 Phase 2 | FMP for Phase 1 screener; Alpaca required for Phase 3 intraday bars (paper feed OK), optional for Phase 2 borrow checks. No SDK — `requests` direct |
 | **FTD Detector** | ✅ Required | ❌ Not used | ❌ Not used | Index price data for rally/FTD detection |
+| **IBD Distribution Day Monitor** | ✅ Required | ❌ Not used | ❌ Not used | Daily QQQ/SPY OHLCV for Distribution Day detection |
 | **Macro Regime Detector** | ✅ Required | ❌ Not used | ❌ Not used | Cross-asset ETF ratio analysis |
 | **Market Breadth Analyzer** | ❌ Not used | ❌ Not used | ❌ Not used | Uses free GitHub CSV data |
 | **Uptrend Analyzer** | ❌ Not used | ❌ Not used | ❌ Not used | Uses free GitHub CSV data |

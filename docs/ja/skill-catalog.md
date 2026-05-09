@@ -68,6 +68,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | **Macro Regime Detector** | クロスアセット比率分析で構造的マクロレジーム転換（1-2年ホライズン）を検出 | <span class="badge badge-api">FMP必須</span> |
 | **[US Market Bubble Detector]({{ '/ja/skills/us-market-bubble-detector/' | relative_url }})** | ミンスキー/キンドルバーガーフレームワークの8指標バブルメーター。ステージ別プレイブック付き | <span class="badge badge-free">API不要</span> |
 | **Market Top Detector** | O'NeilのDistribution Days、MinerviniのLeading Stock劣化、Defensive Rotationで天井確率を検出 | <span class="badge badge-free">API不要</span> |
+| **[IBD Distribution Day Monitor]({{ '/ja/skills/ibd-distribution-day-monitor/' | relative_url }})** | QQQ/SPYのIBD式Distribution Dayを日次検出。25セッション失効・5%上昇無効化を追跡し、d5/d15/d25クラスタからNORMAL/CAUTION/HIGH/SEVERE判定とTQQQ/QQQエクスポージャ推奨を生成 | <span class="badge badge-api">FMP必須</span> |
 | **[Downtrend Duration Analyzer]({{ '/ja/skills/downtrend-duration-analyzer/' | relative_url }})** | 過去の下落トレンド期間（ピーク→トラフ）を分析し、セクター・時価総額別のインタラクティブヒストグラムを生成 | <span class="badge badge-api">FMP必須</span> |
 
 ---
@@ -94,6 +95,7 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | **[Trader Memory Core]({{ '/ja/skills/trader-memory-core/' | relative_url }})** | 投資仮説のライフサイクルを永続追跡。スクリーナー出力をIDEAとして登録し、ENTRY_READY→ACTIVE→CLOSEDのステート遷移、ポジションサイジング付与、レビュースケジュール、MAE/MFE付きポストモーテム生成をサポート | <span class="badge badge-optional">FMP任意</span> |
 | **[Position Sizer]({{ '/ja/skills/position-sizer/' | relative_url }})** | Fixed Fractional、ATRベース、Kelly Criterionの3手法でリスクベースポジションサイズを計算 | <span class="badge badge-free">API不要</span> |
 | **[Breakout Trade Planner]({{ '/ja/skills/breakout-trade-planner/' | relative_url }})** | VCPスクリーナー出力からミネルヴィニ式ブレイクアウトトレードプランを生成。worst-case entryベースのGate、stop-limit bracketテンプレート（pre_place / post_confirm）、ポートフォリオヒート管理 | <span class="badge badge-free">API不要</span> |
+| **[Parabolic Short Trade Planner]({{ '/ja/skills/parabolic-short-trade-planner/' | relative_url }})** | Parabolic Short 候補の日次スクリーナー（5因子加重スコア）と寄り前プラン生成器。候補ごとに3種類のトリガー（5min ORL ブレイク / First Red 5-min / VWAP fail）を条件付きプランとして出力。Alpaca ETB-only ショート確認は `requests` 直叩き（SDK 非依存）、SEC Rule 201 SSR トラッカー、blocking / advisory 分離型 manual confirmation | <span class="badge badge-api">FMP必須</span> <span class="badge badge-optional">Alpaca任意</span> |
 | **[Exposure Coach]({{ '/ja/skills/exposure-coach/' | relative_url }})** | ブレッド、レジーム、トップリスク、フローの各スキル出力を統合し、エクスポージャー上限（0-100%）、グロース/バリュー傾斜、NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY推奨を含むマーケットポスチャーサマリーを生成 | <span class="badge badge-optional">FMP任意</span> |
 | **[US Stock Analysis]({{ '/ja/skills/us-stock-analysis/' | relative_url }})** | ファンダメンタル、テクニカル、同業比較を網羅した包括的米国株リサーチアシスタント | <span class="badge badge-free">API不要</span> |
 | **Earnings Calendar** | FMP APIで今後の決算発表を取得。時価総額$2B以上の中大型株に焦点 | <span class="badge badge-api">FMP必須</span> |
@@ -209,6 +211,8 @@ Claude Trading Skillsの全スキルをカテゴリ別に紹介します。各�
 | Earnings Calendar | 必須 | - | - |
 | Economic Calendar Fetcher | 必須 | - | - |
 | Downtrend Duration Analyzer | 必須 | - | - |
+| IBD Distribution Day Monitor | 必須 | - | - |
+| Parabolic Short Trade Planner | 必須 | - | - |
 | その他すべてのスキル | - | - | - |
 
 「-」は不要を意味します。「任意」はあれば機能強化、なくても基本機能は動作します。

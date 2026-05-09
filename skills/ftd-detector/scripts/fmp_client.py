@@ -122,7 +122,6 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
         historical = historical[:limit]
     return {"symbol": matched_symbol or symbols_str, "historical": historical}
 
-
 def _yf_history(symbol: str, days: int) -> Optional[dict]:
     """Fetch daily OHLCV from yfinance and normalize to FMP historical shape."""
     try:

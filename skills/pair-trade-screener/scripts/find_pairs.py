@@ -108,33 +108,71 @@ def fetch_sector_stocks(sector, api_key, min_market_cap=2_000_000_000):
         sys.exit(1)
 
 
+# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+_FMP_HIST_ENDPOINTS = [
+    (
+        "https://financialmodelingprep.com/stable/historical-price-full",
+        True,
+    ),  # stable: symbol in query
+    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),  # v3: symbol in path
+]
+_endpoint_failures: dict[str, int] = {}
+_BREAKER_THRESHOLD = 3
+
+
+def _fetch_raw_historical(symbol, api_key, params=None):
+    """Try stable endpoint first, fall back to v3. Returns dict or None."""
+    for base_url, is_stable in _FMP_HIST_ENDPOINTS:
+        if _endpoint_failures.get(base_url, 0) >= _BREAKER_THRESHOLD:
+            continue
+        if is_stable:
+            url = base_url
+            req_params = dict(params or {})
+            req_params["symbol"] = symbol
+        else:
+            url = f"{base_url}/{symbol}"
+            req_params = dict(params or {})
+        try:
+            resp = requests.get(url, headers={"apikey": api_key}, params=req_params, timeout=30)
+            if resp.status_code != 200:
+                _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+                continue
+            data = resp.json()
+            if isinstance(data, dict) and "historical" in data:
+                _endpoint_failures[base_url] = 0
+                return data
+            if isinstance(data, dict) and "historicalStockList" in data:
+                for entry in data["historicalStockList"]:
+                    if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
+                        _endpoint_failures[base_url] = 0
+                        return {
+                            "symbol": entry["symbol"],
+                            "historical": entry.get("historical", []),
+                        }
+            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+        except requests.exceptions.RequestException:
+            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+    return None
+
+
 def fetch_historical_prices(symbol, api_key, lookback_days=730):
     """Fetch historical adjusted close prices for a symbol"""
-    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}"
-
-    try:
-        response = requests.get(url, headers={"apikey": api_key}, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        if "historical" not in data:
-            return None
-
-        # Extract historical prices
-        historical = data["historical"][:lookback_days]
-        historical = historical[::-1]  # Reverse to chronological order
-
-        # Convert to pandas Series
-        prices = pd.Series(
-            [item["adjClose"] for item in historical],
-            index=[pd.to_datetime(item["date"]) for item in historical],
-            name=symbol,
-        )
-
-        return prices
-
-    except requests.exceptions.RequestException:
+    data = _fetch_raw_historical(symbol, api_key)
+    if not data:
         return None
+
+    # Extract historical prices
+    historical = data["historical"][:lookback_days]
+    historical = historical[::-1]  # Reverse to chronological order
+
+    # Convert to pandas Series
+    prices = pd.Series(
+        [item["adjClose"] for item in historical],
+        index=[pd.to_datetime(item["date"]) for item in historical],
+        name=symbol,
+    )
+
+    return prices
 
 
 def fetch_price_data_batch(symbols, api_key, lookback_days=730):

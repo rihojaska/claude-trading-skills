@@ -143,6 +143,82 @@ def _yf_history(symbol: str, days: int) -> Optional[dict]:
     return {"symbol": symbol, "historical": rows, "data_source": "yfinance"}
 
 
+# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+
+
+def _stable_hist_url(base, symbols_str, params):
+    """stable/historical-price-eod/full?symbol=SPY&from=...&to=..."""
+    params["symbol"] = symbols_str
+    # New stable EOD endpoint ignores `timeseries`; convert to from/to range
+    # to bound the payload. Use 2x calendar days to cover N trading days
+    # (trading-day/calendar-day ratio ~252/365 ~0.69, so *2 leaves headroom).
+    days = params.pop("timeseries", None)
+    if days is not None:
+        today = date.today()
+        params["from"] = (today - timedelta(days=int(days) * 2)).isoformat()
+        params["to"] = today.isoformat()
+    return base, params
+
+
+def _v3_hist_url(base, symbols_str, params):
+    """api/v3/historical-price-full/SPY?timeseries=600"""
+    return f"{base}/{symbols_str}", params
+
+
+_FMP_ENDPOINTS = {
+    "historical": [
+        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
+        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
+    ],
+}
+
+
+def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None):
+    """Convert stable/historical-price-eod/full flat list to v3-compatible dict.
+
+    Input  : [{"symbol": "SPY", "date": "...", "open": ..., ...}, ...]
+    Output : {"symbol": "SPY", "historical": [{"date": ..., "open": ..., ...}, ...]}
+
+    Returns the input unchanged if not a list (passthrough for v3 dict /
+    historicalStockList responses). Returns None when no row matches the
+    requested symbol; the caller will record the failure and try the next
+    endpoint.
+
+    If `limit` is provided (the original `timeseries=N` request), the
+    `historical` list is truncated to the first `limit` entries. The new
+    EOD endpoint ignores `timeseries` and returns the full available history,
+    so the caller's date-range bounding plus this truncation together preserve
+    the legacy "most-recent N rows" contract. Truncation assumes descending
+    date order, which the FMP EOD endpoint provides (verified live).
+
+    Note: empty list ``[]`` does not reach this normalizer because the caller's
+    ``if not data: continue`` falsy check handles it earlier in
+    ``_request_with_fallback``.
+    """
+    if not isinstance(data, list):
+        return data
+    if not data:
+        return None
+    norm_target = symbols_str.replace("-", ".")
+    matched_symbol = None
+    historical = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        # Be permissive: single-symbol endpoint may omit per-row "symbol".
+        # Treat missing symbol as belonging to the requested symbols_str.
+        row_sym = row.get("symbol") or symbols_str
+        if row_sym.replace("-", ".") != norm_target:
+            continue
+        matched_symbol = matched_symbol or row_sym
+        historical.append({k: v for k, v in row.items() if k != "symbol"})
+    if not historical:
+        return None
+    if limit is not None and limit > 0:
+        historical = historical[:limit]
+    return {"symbol": matched_symbol or symbols_str, "historical": historical}
+
+
 class FMPClient:
     """Client for Financial Modeling Prep API with rate limiting and caching"""
 

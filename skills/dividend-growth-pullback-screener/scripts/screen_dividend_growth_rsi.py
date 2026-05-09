@@ -173,10 +173,19 @@ class FINVIZClient:
             return set()
 
 
+# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+_FMP_HIST_ENDPOINTS = [
+    ("https://financialmodelingprep.com/stable/historical-price-full", True),
+    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
+]
+
+
 class FMPClient:
     """Financial Modeling Prep API client with rate limiting."""
 
     BASE_URL = "https://financialmodelingprep.com/api/v3"
+
+    _ENDPOINT_FAILURE_THRESHOLD = 3
 
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -185,6 +194,8 @@ class FMPClient:
         self.session.headers.update({"apikey": self.api_key})
         self.rate_limit_reached = False
         self.retry_count = 0
+        self._endpoint_failures: dict[str, int] = {}
+        self._disabled_endpoints: set[str] = set()
 
     def _get(self, endpoint: str, params: Optional[dict] = None) -> Optional[dict]:
         """Execute GET request with rate limiting and error handling."""
@@ -210,11 +221,42 @@ class FMPClient:
         return result if result else []
 
     def get_historical_prices(self, symbol: str, days: int = 30) -> Optional[list[dict]]:
-        """Get historical daily prices."""
-        result = self._get(f"historical-price-full/{symbol}", {"timeseries": days})
-        if result and "historical" in result:
-            return result["historical"]
+        """Get historical daily prices (stable endpoint with v3 fallback)."""
+        for base_url, is_stable in _FMP_HIST_ENDPOINTS:
+            if base_url in self._disabled_endpoints:
+                continue
+            if is_stable:
+                url = base_url
+                params = {"symbol": symbol, "timeseries": days}
+            else:
+                url = f"{base_url}/{symbol}"
+                params = {"timeseries": days}
+            try:
+                response = self.session.get(url, params=params, timeout=30)
+                time.sleep(0.3)
+                if response.status_code != 200:
+                    self._record_endpoint_failure(base_url)
+                    continue
+                data = response.json()
+                if isinstance(data, dict) and "historical" in data:
+                    self._endpoint_failures[base_url] = 0
+                    return data["historical"]
+                if isinstance(data, dict) and "historicalStockList" in data:
+                    for entry in data["historicalStockList"]:
+                        if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
+                            self._endpoint_failures[base_url] = 0
+                            return entry.get("historical", [])
+                self._record_endpoint_failure(base_url)
+            except Exception:
+                self._record_endpoint_failure(base_url)
         return None
+
+    def _record_endpoint_failure(self, base_url: str) -> None:
+        """Track consecutive failures and disable endpoint after threshold."""
+        failures = self._endpoint_failures.get(base_url, 0) + 1
+        self._endpoint_failures[base_url] = failures
+        if failures >= self._ENDPOINT_FAILURE_THRESHOLD:
+            self._disabled_endpoints.add(base_url)
 
     def get_dividend_history(self, symbol: str) -> Optional[dict]:
         """Get historical dividend payments."""

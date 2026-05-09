@@ -1,14 +1,73 @@
 # Claude Trading Skills
 
-このリポジトリは、株式投資やトレードに役立つClaudeスキルをまとめたものです。各スキルには、プロンプト設計、参照資料、補助スクリプトが含まれており、システマティックなバックテスト、マーケット分析、テクニカルチャート分析、経済カレンダー監視、米国株リサーチをClaudeに任せることができます。ClaudeのウェブアプリとClaude Codeの両方で活用できます。
+Claude Trading Skills は、作者自身が AI を使って自分のトレードプロセスを改善したいと考えたことから始まりました。
+
+Claude Trading Skills は、時間制約のある個人投資家が、Claude を使って投資・トレード判断を仕組み化するための Claude Skills 集です。
+
+長期投資、ETF、配当株を Core としつつ、相場環境が整ったときには Satellite として規律あるスイングトレードで追加リターンを狙う投資家を主対象にしています。
+
+目的は、AI に売買判断を丸投げすることではありません。市場確認、リスク管理、トレード計画、記録、振り返りを再現可能なプロセスにすることです。より良いトレード判断を支えるワークフロー、チェックリスト、振り返りの習慣は、共有された実践を通じて改善できると考えているため、オープンソースとして公開しています。
+
+これは売買シグナル配信や利益保証のためのプロジェクトではありません。より良い判断プロセスを作りたいトレーダーのための道具箱です。
+
+このプロジェクトの立ち位置は **first for self, open for others** です。まず作者自身が実際に使う実践的な workflow として作り、それを同じ制約を持つ人にも役立つ可能性があるものとして公開します。
 
 📖 **ドキュメントサイト:** <https://tradermonty.github.io/claude-trading-skills/>
 
+**プロジェクトビジョン:** [`PROJECT_VISION.ja.md`](PROJECT_VISION.ja.md)
+
 English README is available at [`README.md`](README.md).
 
+## 免責
+
+このリポジトリは、教育、研究、プロセス改善を目的としたものです。金融助言、投資顧問、税務・法務助言、売買シグナル配信、ブローカー注文執行を提供するものではありません。投資・トレードには元本損失を含むリスクがあります。過去パフォーマンス、バックテスト、スクリーニング結果、レポート、AI が生成した分析は将来の成果を保証しません。最終的な売買判断、ポジションサイズ、税務・規制遵守、ブローカー利用判断は、すべてユーザー自身の責任です。
+
+このプロジェクトは MIT License に基づき、**AS IS, WITHOUT WARRANTY**、つまり保証なしで提供されます。
+
+## このリポジトリが向いている人
+
+このリポジトリは、以下のような人に向いています。
+
+- 投資に使える時間が限られている個人投資家
+- 長期投資を土台にしつつ、相場が良いときだけスイングトレードも行いたい人
+- 配当株、ETF、保有株を定期的に点検したい人
+- 銘柄探しより先に、市場環境とリスクを確認したい人
+- トレードを記録し、振り返りから改善したい人
+
+完全自動売買、売買シグナルの丸投げ、短期スキャルピングを主目的にする人向けではありません。
+
+## おすすめの始め方
+
+初めて使う場合は、Core + Satellite の基本導線から始めるのがおすすめです。
+
+1. **Core Portfolio Weekly**
+   - 長期保有、配当株、ETF、集中リスクを週次で確認する。
+2. **Market Regime Daily**
+   - 今日、新規リスクを取ってよい相場かを確認する。
+3. **Swing Opportunity Daily**
+   - 相場環境が良いときだけ、スイング候補を探す。
+4. **Trade Memory Loop**
+   - トレード仮説、エントリー理由、結果、学びを記録する。
+5. **Monthly Performance Review**
+   - 機能したルール、失敗したルール、改善点を月次で確認する。
+
+## 目的別の始め方
+
+| 目的 | 最初に見る導線 |
+| --- | --- |
+| 毎朝15分で相場を確認したい | Market Regime Daily |
+| 長期ポートフォリオを見直したい | Core Portfolio Weekly |
+| スイング候補を探したい | Swing Opportunity Daily |
+| トレード記録から改善したい | Trade Memory Loop |
+| 新しい戦略を研究したい | Strategy Research |
+
 ## リポジトリ構成
-- `<skill-name>/` – 各スキルのソースフォルダ。`SKILL.md`、参照資料、補助スクリプトが含まれます。
+- `skills/<skill-name>/` – 各スキルのソースフォルダ。`SKILL.md`、参照資料、補助スクリプトが含まれます。
 - `skill-packages/` – Claudeウェブアプリの**Skills**タブへそのままアップロードできる`.skill`パッケージ置き場。
+- `docs/` – ドキュメントサイトのコンテンツと生成済みスキルページ。
+- `scripts/` – リポジトリ全体の自動化・保守スクリプト。
+- `skillsets/` – 追加予定の目的別スキルセット manifest。
+- `workflows/` – 追加予定の実運用 workflow manifest。
 
 ## はじめに
 ### Claudeウェブアプリで使う場合
@@ -23,7 +82,23 @@ English README is available at [`README.md`](README.md).
 
 > ヒント: ソースフォルダとZIPの内容は同一です。スキルをカスタマイズする場合はソースフォルダを編集し、ウェブアプリ向けに配布するときは再度ZIP化してください。
 
-## スキル一覧
+## 主要スキル領域
+
+このリポジトリには、以下の領域のスキルが含まれます。
+
+| 領域 | 代表スキル |
+| --- | --- |
+| Market Regime | `market-breadth-analyzer`, `uptrend-analyzer`, `exposure-coach` |
+| Core Portfolio | `portfolio-manager`, `value-dividend-screener`, `kanchi-dividend-sop` |
+| Swing Opportunities | `vcp-screener`, `canslim-screener`, `breakout-trade-planner` |
+| Trade Planning | `position-sizer`, `technical-analyst` |
+| Trade Memory | `trader-memory-core`, `signal-postmortem` |
+| Strategy Research | `backtest-expert`, `edge-pipeline-orchestrator` |
+| Advanced Satellite | `parabolic-short-trade-planner`, `earnings-trade-analyzer`, `options-strategy-advisor` |
+
+以下の詳細カタログはクイックリファレンスとして残しています。より見やすい一覧はドキュメントサイトを参照してください。
+
+## 詳細スキル一覧
 
 ### マーケット分析・リサーチ
 
@@ -106,7 +181,7 @@ English README is available at [`README.md`](README.md).
 ### 戦略・リスク管理
 
 - **シナリオアナライザー** (`scenario-analyzer`)
-  - ニュースヘッドラインを入力として18ヶ月シナリオを分析。1次・2次・3次影響、推奨銘柄、レビューを含む包括的レポートを生成。
+  - ニュースヘッドラインを入力として18ヶ月シナリオを分析。1次・2次・3次影響、候補銘柄、レビューを含む包括的レポートを生成。
   - デュアルエージェント構成: scenario-analystで主分析、strategy-reviewerでセカンドオピニオンを取得。
   - APIキー不要 - WebSearchでニュース収集。
 
@@ -125,7 +200,7 @@ English README is available at [`README.md`](README.md).
 - **米国市場バブル検出器** (`us-market-bubble-detector`)
   - 定量的8指標「バブルメーター」スコアリングシステムを備えたミンスキー/キンドルバーガーバブルフレームワーク。
   - バブルステージを識別：転換 → ブーム → 熱狂 → 利益確定 → パニック。
-  - 各ステージの実行可能なプレイブックを提供：利益確定戦略、ヘッジ戦術、現金展開タイミング。
+  - 各ステージのレビュー用プレイブックを提供：利益確定検討、ヘッジ検討、現金展開タイミングの確認。
   - 歴史的ケースファイル（ドットコム2000、住宅2008、COVID 2020）、クイックリファレンスチェックリスト（日英）、対話型スコアラースクリプト`scripts/bubble_scorer.py`を補足。
 
 - **オプション戦略アドバイザー** (`options-strategy-advisor`)
@@ -136,14 +211,23 @@ English README is available at [`README.md`](README.md).
 - **ポートフォリオマネージャー** (`portfolio-manager`)
   - Alpaca MCP Server連携によるリアルタイム保有データを使った包括的ポートフォリオ分析・管理。
   - 多次元分析: 資産配分、セクター分散、リスク指標（ベータ、ボラティリティ、ドローダウン）、パフォーマンスレビュー。
-  - HOLD/ADD/TRIM/SELLのポジションレベル推奨とリバランス計画を生成。
+  - HOLD/ADD/TRIM/SELL などの検討フラグを生成し、ユーザー自身のレビューを支援する。
+  - リバランス案を生成し、実際にどのアクションを取るかはユーザーが手動で判断する。
   - Alpaca証券口座（ペーパーまたはライブ）とAlpaca MCP Serverの設定が必要。
 
 - **ポジションサイザー** (`position-sizer`)
   - Fixed Fractional、ATRベース、Kelly Criterionの3手法でロング株式トレードのリスクベースポジションサイズを計算。
   - ポートフォリオ制約（最大ポジション%、最大セクター%）を適用し、最も厳しい制約（binding constraint）を特定。
-  - 2つの出力モード: sharesモード（エントリー/ストップ指定）で最終推奨株数、budgetモード（Kelly単独）で推奨リスク予算を返却。
+  - 2つの出力モード: sharesモード（エントリー/ストップ指定）で株数候補、budgetモード（Kelly単独）でリスク予算候補を返却。
   - JSON + マークダウンレポートを生成。APIキー不要 — 純粋計算、オフラインで動作。
+
+- **Parabolic Short トレードプランナー** (`parabolic-short-trade-planner`)
+  - Qullamaggie 型 Parabolic Short 候補の日次スクリーナー（5因子加重スコア: MA Extension 30% / Acceleration 25% / Volume Climax 20% / Range Expansion 15% / Liquidity 10%）。`safe_largecap` / `classic_qm` の2モードで無効化閾値を切り替え。
+  - 寄り前プラン生成器が候補ごとに3種類の条件付きトリガー（5min ORL ブレイク、First Red 5-min、VWAP fail）を出力。`entry_hint` / `stop_hint` は数式文字列で、shares は固定値ではなく `shares_formula` として Phase 3 で trigger 発火時に評価。
+  - Phase 3 当日トリガーモニター（`monitor_intraday_trigger.py`）— Alpaca ライブまたは fixture から 5分足を取得し、トリガー別 FSM（ORL: 3 状態、First Red: 4 状態 + same-bar invalidation 優先、VWAP fail: 6 状態）を1ステップ進めて `intraday_monitor` JSON に `state` / `entry_actual` / `stop_actual` / `shares_actual`（triggered 時）を出力。リプレイ決定論（再実行で byte-identical）；`triggered` は terminal ではなく、post-trigger reclaim で `invalidated` へ遷移可能。`watch -n 60` または5分 cron でラップ。
+  - 抽象化された broker short-inventory adapter。Alpaca 実装は `requests` 直叩き（SDK 非依存）で ETB-only ポリシーを表現し、HTB 銘柄は `borrow_inventory_unavailable` → `plan_status: watch_only` として明示。
+  - SEC Rule 201 (SSR) 状態トラッカーは Phase 1 出力の `prior_close`（regular session close、aftermarket ではない）を引継ぎ、銘柄別の state file で翌日の carryover に反映。
+  - Manual confirmation 理由は `blocking_manual_reasons`（HTB 借株、SSR 発動、premarket high/low 取得失敗）と `advisory_manual_reasons`（`manual_locate_required` は常に advisory）に分離。FMP API 必須、Alpaca は Phase 3 で必須（paper feed で OK）、Phase 2 ではオプション（未設定時は manual fallback）。
 
 - **エッジ候補エージェント** (`edge-candidate-agent`)
   - 日次マーケット観察を再現可能なリサーチチケットに変換し、`trade-strategy-pipeline` Phase I互換の候補スペックをエクスポート。
@@ -199,7 +283,7 @@ English README is available at [`README.md`](README.md).
 - **エクスポージャーコーチ** (`exposure-coach`)
   - market-breadth-analyzer、uptrend-analyzer、macro-regime-detector、market-top-detector、ftd-detector、theme-detector、sector-analyst、institutional-flow-tracker の出力を統合し、エクスポージャー決定を一元化。
   - 「今、株式にどれだけ資本を投入すべきか？」という核心的な問いに回答。
-  - エクスポージャー上限（0-100%）、グロース/バリュー傾斜、参加幅評価、行動推奨（NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY）を含む1ページのマーケットポスチャーサマリーを生成。
+  - エクスポージャー上限（0-100%）、グロース/バリュー傾斜、参加幅評価、ポスチャー用レビューフラグ（NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY）を含む1ページのマーケットポスチャーサマリーを生成。
   - 部分的な入力にも対応 — upstreamファイルが欠落してもconfidenceレベルが低下するだけで実行はブロックされない。
   - FMP APIキーは任意（institutional-flow-trackerデータ利用時のみ必要）。
 
@@ -216,6 +300,13 @@ English README is available at [`README.md`](README.md).
 - **マーケットトップ検出器** (`market-top-detector`)
   - O'NeilのDistribution Days、MinerviniのLeading Stock Deterioration、MontyのDefensive Rotationを使用してマーケットトップの確率を検出。
   - 分配と天井形成パターンを識別する6コンポーネント戦術的タイミングシステム。
+
+- **IBD Distribution Day Monitor** (`ibd-distribution-day-monitor`)
+  - QQQ/SPYに対するIBD式Distribution Day（終値0.2%以上下落＋出来高増加）を日次検出。25取引セッション失効・5%上昇による無効化を追跡。
+  - `age_sessions` で各レコードを管理し、`d5/d15/d25` クラスタから NORMAL/CAUTION/HIGH/SEVERE のリスク判定を生成。
+  - TQQQ/QQQ向けエクスポージャーレビュー用フラグを出力（TQQQは3倍レバレッジ特性により早めに縮小）。トレーリングストップ参考水準も併せて提示。
+  - Market Top Detectorとの違い: 単一コンポーネント／ETF直結／TQQQ特性考慮。Market Top Detectorは6コンポーネント複合スコア。
+  - FMP APIキーが必要。
 
 - **下落トレンド期間分析** (`downtrend-duration-analyzer`)
   - 過去の下落トレンド期間（ピーク→トラフ）を分析し、セクター・時価総額別のインタラクティブHTMLヒストグラムを生成。
@@ -258,14 +349,13 @@ English README is available at [`README.md`](README.md).
   - 多段階フィルタリング: トレンドテンプレート → VCPベース検出 → 収縮分析 → ピボットポイント計算。
   - FMP APIキーが必要（無料ティアで上位100候補のデフォルトスクリーニングに十分）。
 
-- **CANSLIM株式スクリーナー** (`canslim-screener`) - **Phase 2**
+- **CANSLIM株式スクリーナー** (`canslim-screener`) - **Phase 3.1**
   - William O'NeilのCANSLIM成長株手法を用いて米国株をスクリーニング。マルチバガー候補の発見に特化。
-  - Phase 2では7コンポーネントのうち6つを実装（80%カバレッジ）：C (四半期決算)、A (年次成長)、N (新高値)、S (需給)、I (機関投資家)、M (市場方向)。
-  - 複合スコアリング（0-100）と重み付け：C 19%、A 25%、N 19%、S 19%、I 13%、M 6%。
-  - ボリュームベースの蓄積/分配分析（Sコンポーネント）とFinvizフォールバック付き機関投資家所有率追跡（Iコンポーネント）。
-  - ベアマーケット保護：Mコンポーネントが全ての買い推奨をゲート（M=0で「現金化」警告）。
-  - FMP API統合。無料ティア（250 calls/日）で40銘柄分析可能。
-  - 将来のPhase 3でL (リーダーシップ/RS Rank) コンポーネントを追加して全7コンポーネント完成予定。
+  - **Phase 3.1** では全7コンポーネント（100%カバレッジ）を **マルチ期間 RS** で実装：C (四半期決算)、A (年次成長)、N (新高値)、S (需給)、**L (リーダーシップ / マルチ期間 RS)**、I (機関投資家)、M (市場方向)。
+  - L コンポーネントは 3m / 6m / 12m 重み付け RS（`0.40 × rel_3m + 0.30 × rel_6m + 0.30 × rel_12m`）を設定可能 benchmark（`--rs-benchmark`、デフォルト `^GSPC`）に対して計算。
+  - 複合スコアリング（0-100）は O'Neil 原版重み：C 15%、A 20%、N 15%、S 15%、**L 20%**、I 10%、M 5%。
+  - ベアマーケット保護：M=0 で「現金化」警告。`--disable-rs` で L を中立 50 に固定し API 予算を節約可能。
+  - JSON 出力に RS 専用フィールドを追加：`rs_rating`、`rs_rank_percentile`、`rs_3m_return` / `rs_6m_return` / `rs_12m_return`、`rs_benchmark`、`rs_benchmark_relative_return`、`rs_component_score`、`benchmark_52w_performance`。Markdown には Summary Table を追加。スキーマバージョン `3.1`。
 
 - **バリュー配当スクリーナー** (`value-dividend-screener`)
   - FMP APIを使用して高品質な配当投資機会をスクリーニング。
@@ -310,7 +400,9 @@ English README is available at [`README.md`](README.md).
   - 高配当バリュー、小型成長株、売られすぎ大型株、ブレイクアウト候補、AI/テーマ投資等、14のプリセットレシピを収録。
   - 基本利用にAPIキー不要（パブリックFinVizスクリーナー）。FINVIZ Eliteは任意で拡張機能利用可能。
 
-## ワークフロー例
+## 追加ワークフロー例
+
+Core + Satellite の主導線は上記の「おすすめの始め方」にまとめています。以下は、Advanced Satellite やコントリビューター向けを含む追加の組み合わせ例です。
 
 ### 日次マーケット監視
 1. **経済カレンダー取得**を使用して、今日の高インパクトイベント（FOMC、NFP、CPI発表）をチェック
@@ -379,6 +471,8 @@ English README is available at [`README.md`](README.md).
 
 ## スキル自己改善ループ
 
+このセクションはコントリビューター向けです。初めて使う人は読み飛ばして、上記の Core + Satellite 導線から始めてください。
+
 スキル品質を継続的にレビュー・改善する自動パイプライン。毎日の`launchd`ジョブが1つのスキルを選択し、デュアルアクシスレビュアーでスコアリングし、スコアが90/100未満の場合は`claude -p`で改善を適用してPRを作成します。
 
 ### 仕組み
@@ -431,6 +525,8 @@ launchctl start com.trade-analysis.skill-improvement
 | `reports/skill-improvement-log/` | 日次サマリーレポート |
 
 ## スキル自動生成パイプライン
+
+このセクションはコントリビューター向けです。トレード運用に必須の workflow ではなく、リポジトリ保守用の自動化です。
 
 セッションログからスキルアイデアをマイニング（週次）し、設計・レビュー・PR作成（日次）を自動実行するパイプライン。自己改善ループと連携してスキルカタログを継続的に拡張します。
 
@@ -497,7 +593,7 @@ launchctl start com.trade-analysis.skill-generation-daily
 
 いくつかのスキルはデータアクセスのためにAPIキーが必要です：
 
-- **経済カレンダー取得**、**決算カレンダー**、**CANSLIM株式スクリーナー**、**VCPスクリーナー**、**FTD検出器**、**マクロレジーム検出器**: [Financial Modeling Prep (FMP) API](https://financialmodelingprep.com)キーが必要
+- **経済カレンダー取得**、**決算カレンダー**、**CANSLIM株式スクリーナー**、**VCPスクリーナー**、**FTD検出器**、**マクロレジーム検出器**、**IBD Distribution Day Monitor**: [Financial Modeling Prep (FMP) API](https://financialmodelingprep.com)キーが必要
   - 無料ティア: 250リクエスト/日（ほとんどのスキルに十分）
   - 環境変数を設定: `export FMP_API_KEY=your_key_here`
   - または、プロンプト時にコマンドライン引数でキーを提供

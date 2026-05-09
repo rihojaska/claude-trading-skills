@@ -30,28 +30,46 @@ def get_fmp_api_key() -> Optional[str]:
 
 def fetch_price_data(ticker: str, start_date: str, end_date: str, api_key: str) -> dict:
     """
-    Fetch historical price data from FMP API.
+    Fetch historical price data from FMP API (stable with v3 fallback).
 
     Returns dict mapping date string to close price.
     """
     if not HAS_REQUESTS:
         return {}
 
-    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker}"
-    params = {"from": start_date, "to": end_date, "apikey": api_key}
+    endpoints = [
+        ("https://financialmodelingprep.com/stable/historical-price-full", True),
+        ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
+    ]
+    for base_url, is_stable in endpoints:
+        try:
+            if is_stable:
+                url = base_url
+                params = {"symbol": ticker, "from": start_date, "to": end_date, "apikey": api_key}
+            else:
+                url = f"{base_url}/{ticker}"
+                params = {"from": start_date, "to": end_date, "apikey": api_key}
+            resp = requests.get(url, params=params, timeout=30)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            historical = None
+            if isinstance(data, dict) and "historical" in data:
+                historical = data["historical"]
+            elif isinstance(data, dict) and "historicalStockList" in data:
+                for entry in data["historicalStockList"]:
+                    if entry.get("symbol", "").replace("-", ".") == ticker.replace("-", "."):
+                        historical = entry.get("historical", [])
+                        break
+            if historical is not None:
+                return {item["date"]: item["close"] for item in historical}
+        except Exception:  # nosec B112 - intentional fallback to next FMP endpoint
+            continue
 
-    try:
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-
-        if "historical" not in data:
-            return {}
-
-        return {item["date"]: item["close"] for item in data["historical"]}
-    except Exception as e:
-        print(f"Warning: Failed to fetch price data for {ticker}: {e}", file=sys.stderr)
-        return {}
+    print(
+        f"Warning: Failed to fetch price data for {ticker}: all endpoints failed", file=sys.stderr
+    )
+    return {}
 
 
 def calculate_return(entry_price: float, exit_price: float) -> float:

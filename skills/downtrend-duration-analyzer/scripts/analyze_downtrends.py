@@ -88,30 +88,56 @@ def fetch_stock_list(api_key: str, sector: str | None = None) -> list[dict]:
         return []
 
 
+# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+_FMP_HIST_ENDPOINTS = [
+    ("https://financialmodelingprep.com/stable/historical-price-full", True),
+    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
+]
+_endpoint_failures: dict[str, int] = {}
+_BREAKER_THRESHOLD = 3
+
+
 def fetch_historical_prices(
     api_key: str, symbol: str, from_date: str, to_date: str
 ) -> pd.DataFrame:
     """Fetch historical daily prices for a symbol."""
-    url = (
-        f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}"
-        f"?from={from_date}&to={to_date}&apikey={api_key}"
-    )
-
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        if "historical" not in data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data["historical"])
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
-        return df[["date", "open", "high", "low", "close", "volume"]]
-    except requests.RequestException as e:
-        print(f"Error fetching prices for {symbol}: {e}", file=sys.stderr)
-        return pd.DataFrame()
+    for base_url, is_stable in _FMP_HIST_ENDPOINTS:
+        if _endpoint_failures.get(base_url, 0) >= _BREAKER_THRESHOLD:
+            continue
+        if is_stable:
+            url = base_url
+            params = {"symbol": symbol, "from": from_date, "to": to_date, "apikey": api_key}
+        else:
+            url = f"{base_url}/{symbol}"
+            params = {"from": from_date, "to": to_date, "apikey": api_key}
+        try:
+            response = requests.get(url, params=params, timeout=30)
+            if response.status_code != 200:
+                _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+                continue
+            data = response.json()
+            historical = None
+            if isinstance(data, dict) and "historical" in data:
+                historical = data["historical"]
+            elif isinstance(data, dict) and "historicalStockList" in data:
+                for entry in data["historicalStockList"]:
+                    if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
+                        historical = entry.get("historical", [])
+                        break
+            if historical is not None:
+                _endpoint_failures[base_url] = 0
+                df = pd.DataFrame(historical)
+                if df.empty:
+                    return df
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.sort_values("date").reset_index(drop=True)
+                return df[["date", "open", "high", "low", "close", "volume"]]
+            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+        except requests.RequestException:
+            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+            continue
+    print(f"Error fetching prices for {symbol}: all endpoints failed", file=sys.stderr)
+    return pd.DataFrame()
 
 
 def detect_peaks_troughs(

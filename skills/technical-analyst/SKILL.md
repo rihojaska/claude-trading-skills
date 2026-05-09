@@ -9,6 +9,25 @@ description: This skill should be used when analyzing weekly price charts for st
 
 This skill enables comprehensive technical analysis of weekly price charts. Analyze chart images to identify trends, support and resistance levels, moving average relationships, volume patterns, and develop probabilistic scenarios for future price movement. All analysis is conducted objectively using only chart data, without influence from news, fundamentals, or market sentiment.
 
+## When to Use
+
+- User provides weekly chart images (stocks, indices, crypto, forex) and requests technical analysis
+- Need to identify trend direction, strength, and potential reversal points
+- Looking for support/resistance levels and key price zones
+- Want probabilistic scenario planning with specific price targets
+- Require objective chart-based analysis without fundamental or news considerations
+
+## Prerequisites
+
+- **Chart Images**: User must provide weekly timeframe chart images for analysis
+- **No API Keys Required**: This skill analyzes user-provided images; no external data fetches
+
+## Output
+
+This skill generates markdown analysis reports saved to the `reports/` directory:
+- **File format**: `[SYMBOL]_technical_analysis_[YYYY-MM-DD].md`
+- **Content**: Comprehensive analysis including trend, S/R levels, MA analysis, volume, patterns, and 2-4 probabilistic scenarios with targets and invalidation levels
+
 ## Core Principles
 
 1. **Pure Chart Analysis**: Base all conclusions exclusively on technical data visible in the chart

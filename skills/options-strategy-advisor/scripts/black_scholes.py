@@ -336,26 +336,41 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
     list
         List of adjusted close prices
     """
-    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}"
+    # Try stable endpoint first, fall back to v3
+    endpoints = [
+        ("https://financialmodelingprep.com/stable/historical-price-full", True),
+        ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
+    ]
+    for base_url, is_stable in endpoints:
+        try:
+            if is_stable:
+                url = base_url
+                resp = requests.get(
+                    url, headers={"apikey": api_key}, params={"symbol": symbol}, timeout=30
+                )
+            else:
+                url = f"{base_url}/{symbol}"
+                resp = requests.get(url, headers={"apikey": api_key}, timeout=30)
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            historical = None
+            if isinstance(data, dict) and "historical" in data:
+                historical = data["historical"]
+            elif isinstance(data, dict) and "historicalStockList" in data:
+                for entry in data["historicalStockList"]:
+                    if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
+                        historical = entry.get("historical", [])
+                        break
+            if historical:
+                historical = historical[:days]
+                historical = historical[::-1]  # Reverse to chronological order
+                return [item["adjClose"] for item in historical]
+        except Exception:  # nosec B112 - intentional fallback to next FMP endpoint
+            continue
 
-    try:
-        response = requests.get(url, headers={"apikey": api_key}, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-
-        if "historical" not in data:
-            return None
-
-        # Get most recent 'days' of data
-        historical = data["historical"][:days]
-        historical = historical[::-1]  # Reverse to chronological order
-
-        prices = [item["adjClose"] for item in historical]
-        return prices
-
-    except Exception as e:
-        print(f"Error fetching prices for {symbol}: {e}")
-        return None
+    print(f"Error fetching prices for {symbol}: all endpoints failed")
+    return None
 
 
 # =============================================================================

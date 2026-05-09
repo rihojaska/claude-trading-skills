@@ -14,7 +14,10 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
+_FMP_HIST_ENDPOINTS = [
+    ("https://financialmodelingprep.com/stable/historical-price-full", True),
+    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
+]
 
 
 class FMPPriceAdapter:
@@ -37,28 +40,54 @@ class FMPPriceAdapter:
             List of {"date": "YYYY-MM-DD", "close": float}, oldest first.
 
         Raises:
-            urllib.error.URLError: On network/API errors.
+            urllib.error.URLError: On network/API errors (only if all endpoints fail).
             ValueError: On invalid response.
         """
-        url = f"{FMP_BASE_URL}/historical-price-full/{ticker}?from={from_date}&to={to_date}"
-        req = urllib.request.Request(url, headers={"apikey": self.api_key})
+        last_error = None
+        for base_url, is_stable in _FMP_HIST_ENDPOINTS:
+            if is_stable:
+                url = f"{base_url}?symbol={ticker}&from={from_date}&to={to_date}"
+            else:
+                url = f"{base_url}/{ticker}?from={from_date}&to={to_date}"
+            req = urllib.request.Request(url, headers={"apikey": self.api_key})
 
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            logger.error("FMP API error for %s: %s", ticker, e)
-            raise
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                last_error = e
+                logger.debug("FMP endpoint %s failed for %s: %s", base_url, ticker, e)
+                continue
 
-        historical = data.get("historical", [])
-        if not historical:
-            logger.warning("No price data returned for %s (%s to %s)", ticker, from_date, to_date)
+            historical = self._extract_historical(data, ticker)
+            if not historical:
+                continue
+
+            # FMP returns newest first; reverse to oldest first
+            result = [
+                {"date": item["date"], "close": item["adjClose"]}
+                for item in reversed(historical)
+                if "date" in item and "adjClose" in item
+            ]
+            return result
+
+        if last_error:
+            logger.error("FMP API error for %s: %s", ticker, last_error)
+            raise last_error
+
+        logger.warning("No price data returned for %s (%s to %s)", ticker, from_date, to_date)
+        return []
+
+    @staticmethod
+    def _extract_historical(data: dict, ticker: str) -> list[dict]:
+        """Extract historical array from FMP response (stable or v3 format)."""
+        if not isinstance(data, dict):
             return []
-
-        # FMP returns newest first; reverse to oldest first
-        result = [
-            {"date": item["date"], "close": item["adjClose"]}
-            for item in reversed(historical)
-            if "date" in item and "adjClose" in item
-        ]
-        return result
+        if "historical" in data:
+            return data["historical"]
+        if "historicalStockList" in data:
+            norm = ticker.replace("-", ".")
+            for entry in data["historicalStockList"]:
+                if entry.get("symbol", "").replace("-", ".") == norm:
+                    return entry.get("historical", [])
+        return []
