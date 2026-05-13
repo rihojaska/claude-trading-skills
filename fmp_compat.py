@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import time
 from datetime import date, timedelta
 from typing import Any
@@ -291,6 +292,14 @@ def fmp_get(
     """
     keys = get_fmp_keys()
     if not keys:
+        if not getattr(fmp_get, "_warned_no_keys", False):
+            print(
+                "WARN: fmp_get() — no FMP keys in environment. "
+                "Set FMP_API_KEY (and optionally FMP_FALLBACK_API_KEY), "
+                "or source an env file that uses `export`.",
+                file=sys.stderr,
+            )
+            fmp_get._warned_no_keys = True
         return None
 
     url = build_url(path) if not path.startswith("http") else _translate_url(path)

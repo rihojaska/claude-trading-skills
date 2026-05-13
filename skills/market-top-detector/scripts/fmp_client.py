@@ -29,7 +29,7 @@ SKILL_ROOT = Path(__file__).resolve().parents[3]
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
-from fmp_compat import fmp_get
+from fmp_compat import fmp_get, get_fmp_keys
 
 
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
@@ -223,7 +223,13 @@ class FMPClient:
         self.last_call_time = time.time()
         self.api_calls_made += 1
         if data is None and not quiet:
-            print(f"ERROR: FMP request failed or quota-limited: {url}", file=sys.stderr)
+            if not get_fmp_keys():
+                print(
+                    "ERROR: FMP keys not in environment — likely a source/export bug, not a quota issue",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ERROR: FMP request failed or quota-limited: {url}", file=sys.stderr)
         return data
 
     def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
