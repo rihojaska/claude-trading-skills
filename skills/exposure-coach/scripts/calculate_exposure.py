@@ -59,6 +59,9 @@ def extract_breadth_score(data: Optional[dict]) -> Optional[int]:
         return int(data["breadth_score"])
     if "composite_score" in data:
         return int(data["composite_score"])
+    # Producer output (market-breadth-analyzer) nests the score under `composite`.
+    if isinstance(data.get("composite"), dict) and "composite_score" in data["composite"]:
+        return int(round(data["composite"]["composite_score"]))
     if "ad_ratio" in data and "nh_nl_ratio" in data:
         ad = data["ad_ratio"]
         nh_nl = data["nh_nl_ratio"]
@@ -79,6 +82,9 @@ def extract_uptrend_score(data: Optional[dict]) -> Optional[int]:
         return None
     if "uptrend_score" in data:
         return int(data["uptrend_score"])
+    # Producer output (uptrend-analyzer) nests the score under `composite`.
+    if isinstance(data.get("composite"), dict) and "composite_score" in data["composite"]:
+        return int(round(data["composite"]["composite_score"]))
     if "uptrend_pct" in data:
         pct = data["uptrend_pct"]
         if pct > 50:
@@ -124,6 +130,10 @@ def extract_top_risk_score(data: Optional[dict]) -> Optional[int]:
         return None
     if "top_risk_score" in data:
         return int(data["top_risk_score"])
+    # Producer output (market-top-detector) nests the score under `composite`.
+    # It is already inverted (low = risky); use AS-IS — do NOT re-invert (100-x).
+    if isinstance(data.get("composite"), dict) and "composite_score" in data["composite"]:
+        return int(round(data["composite"]["composite_score"]))
     if "top_probability" in data:
         prob = data["top_probability"]
         # Invert: high probability = low score
@@ -147,6 +157,9 @@ def extract_ftd_score(data: Optional[dict]) -> Optional[int]:
         return None
     if "ftd_score" in data:
         return int(data["ftd_score"])
+    # Producer output (ftd-detector) nests the score under `quality_score`.
+    if isinstance(data.get("quality_score"), dict) and "total_score" in data["quality_score"]:
+        return int(round(data["quality_score"]["total_score"]))
     if "anomaly_level" in data:
         level = data["anomaly_level"].lower()
         mapping = {"none": 90, "low": 80, "moderate": 55, "elevated": 35, "critical": 15}

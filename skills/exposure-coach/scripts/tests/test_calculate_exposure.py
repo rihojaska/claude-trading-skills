@@ -12,6 +12,7 @@ from calculate_exposure import (
     determine_participation,
     determine_recommendation,
     extract_breadth_score,
+    extract_ftd_score,
     extract_regime_score,
     extract_top_risk_score,
     extract_uptrend_score,
@@ -460,3 +461,36 @@ class TestIntegration:
             assert data["exposure_ceiling_pct"] < 50
         finally:
             sys.argv = original_argv
+
+
+class TestProducerNesting:
+    """MP-3: extractors descend into the real producer nesting.
+
+    The upstream detectors (market-breadth-analyzer, uptrend-analyzer,
+    market-top-detector, ftd-detector) nest their score under `composite.
+    composite_score` (or `quality_score.total_score` for FTD), not as a flat
+    top-level key. int(round()) preserves the Optional[int] contract without
+    downward bias (57.7 → 58, not 57)."""
+
+    def test_breadth_composite_nesting(self):
+        assert extract_breadth_score({"composite": {"composite_score": 42.4}}) == 42
+
+    def test_uptrend_composite_nesting_rounds(self):
+        assert extract_uptrend_score({"composite": {"composite_score": 57.7}}) == 58
+
+    def test_top_risk_composite_nesting_not_reinverted(self):
+        # 29.3 is already inverted (low = risky); used as-is, NOT 100-29=71.
+        assert extract_top_risk_score({"composite": {"composite_score": 29.3}}) == 29
+
+    def test_ftd_quality_score_nesting(self):
+        assert extract_ftd_score({"quality_score": {"total_score": 95}}) == 95
+
+    def test_flat_keys_still_win_over_nesting(self):
+        # The pre-existing flat-key contract is preserved (no regression).
+        assert extract_breadth_score({"breadth_score": 75}) == 75
+        assert extract_breadth_score({"composite_score": 60}) == 60
+
+    def test_empty_composite_falls_through(self):
+        # A `composite` that lacks composite_score must not crash; falls through.
+        assert extract_breadth_score({"composite": {}}) is None
+        assert extract_ftd_score({"quality_score": {}}) is None
