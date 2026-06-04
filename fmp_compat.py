@@ -50,6 +50,58 @@ from requests import Session
 
 FMP_BASE = "https://financialmodelingprep.com"
 
+# ── Secrets self-load (added 2026-06-04) ──────────────────────────────────────
+# Populate os.environ from a discovered `secrets.env` at import so consumers
+# don't need a shell `source secrets.env` first (the Investment credential hook
+# refuses that for interactive Bash, and the idiom is brittle across runner
+# contexts). Self-contained by design: this shim ships in a public, standalone
+# repo, so it does NOT depend on the private app's loader. setdefault semantics —
+# a pre-existing env var (shell / cloud runner) always wins.
+
+
+def _load_secrets_env() -> int:
+    """Inject KEY=VALUE pairs from a discovered creds file into os.environ.
+
+    Discovery order: ``$CLAUDE_PROJECT_DIR`` → each parent of this file → ``$PWD``.
+    Only fills gaps (never overrides a pre-set var). Silent-safe; returns the
+    count of keys injected.
+    """
+    from pathlib import Path
+
+    fname = "secrets.env"
+    candidates: list[Any] = []
+    proj = os.environ.get("CLAUDE_PROJECT_DIR", "").strip()
+    if proj:
+        candidates.append(Path(proj) / fname)
+    for parent in Path(__file__).resolve().parents:
+        candidates.append(parent / fname)
+    candidates.append(Path.cwd() / fname)
+    injected = 0
+    try:
+        env_path = next((c for c in candidates if c.is_file()), None)
+        if env_path is None:
+            return 0
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if key and val and key not in os.environ:
+                os.environ[key] = val
+                injected += 1
+    except Exception:
+        return injected
+    return injected
+
+
+_load_secrets_env()
+
 # ── v3 → stable endpoint map ──────────────────────────────────────────────────
 
 _V3_TO_STABLE = {
