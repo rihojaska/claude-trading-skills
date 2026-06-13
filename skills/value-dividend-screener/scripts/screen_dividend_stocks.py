@@ -57,6 +57,13 @@ def _yf_dividend_history(symbol: str) -> Optional[dict]:
     if dividends is None or dividends.empty:
         return None
 
+    # yfinance>=1.3.0 returns .dividends as a Series; <=1.2.2 returns a 1-col
+    # DataFrame whose .items() yields (col_name, Series) — not (date, value) —
+    # crashing the loop below on float(Series). Squeeze a DataFrame to its single
+    # column. No-op on a Series (ndim 1), so the result is identical on 1.3.0.
+    if getattr(dividends, "ndim", 1) == 2:
+        dividends = dividends.iloc[:, 0]
+
     rows = []
     for idx, value in dividends.items():
         dividend = float(value or 0)
