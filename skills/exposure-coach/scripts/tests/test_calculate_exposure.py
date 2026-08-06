@@ -478,9 +478,14 @@ class TestProducerNesting:
     def test_uptrend_composite_nesting_rounds(self):
         assert extract_uptrend_score({"composite": {"composite_score": 57.7}}) == 58
 
-    def test_top_risk_composite_nesting_not_reinverted(self):
-        # 29.3 is already inverted (low = risky); used as-is, NOT 100-29=71.
-        assert extract_top_risk_score({"composite": {"composite_score": 29.3}}) == 29
+    def test_top_risk_composite_nesting_inverts(self):
+        # market-top-detector composite_score runs high = high top risk
+        # (SKILL.md: 81-100 = Critical/Top Formation). The extractor's contract
+        # is inverted (high risk = low score), so the nested branch must apply
+        # 100 - x like its top_probability sibling.
+        assert extract_top_risk_score({"composite": {"composite_score": 29.3}}) == 70
+        # Critical top reading (85) must read as risky (15), not "very safe" (85).
+        assert extract_top_risk_score({"composite": {"composite_score": 85}}) == 15
 
     def test_ftd_quality_score_nesting(self):
         assert extract_ftd_score({"quality_score": {"total_score": 95}}) == 95

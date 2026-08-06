@@ -131,9 +131,10 @@ def extract_top_risk_score(data: Optional[dict]) -> Optional[int]:
     if "top_risk_score" in data:
         return int(data["top_risk_score"])
     # Producer output (market-top-detector) nests the score under `composite`.
-    # It is already inverted (low = risky); use AS-IS — do NOT re-invert (100-x).
+    # Its composite_score runs high = high top risk (SKILL.md: 81-100 Critical),
+    # so invert to this extractor's contract, like the top_probability branch.
     if isinstance(data.get("composite"), dict) and "composite_score" in data["composite"]:
-        return int(round(data["composite"]["composite_score"]))
+        return max(0, min(100, int(100 - data["composite"]["composite_score"])))
     if "top_probability" in data:
         prob = data["top_probability"]
         # Invert: high probability = low score
