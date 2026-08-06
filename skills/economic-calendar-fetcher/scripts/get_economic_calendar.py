@@ -49,7 +49,7 @@ def fetch_economic_calendar(from_date: str, to_date: str, api_key: str) -> list[
 
     Raises:
         urllib.error.HTTPError: If API request fails
-        ValueError: If response is invalid
+        ValueError: If response is invalid, or if the endpoint is restricted (402)
     """
     if fmp_get is None:
         raise ValueError("fmp_compat.py is required for economic-calendar fallback handling")

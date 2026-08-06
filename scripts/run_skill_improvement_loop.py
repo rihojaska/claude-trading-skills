@@ -9,9 +9,11 @@ and opens a PR when the score is below threshold.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -439,6 +441,181 @@ def check_existing_pr(project_root: Path, branch_name: str) -> bool:
         return False
 
 
+# ── Code-faithfulness gate ──
+#
+# The reviewer rewards the *presence* of a `## Prerequisites` section but never
+# validates its *content*. Without a guard, the LLM improver can satisfy the
+# finding by copying boilerplate from another skill: PR #164 added
+# "Python 3.8+ with pandas and requests" to a skill that imports neither pandas
+# nor runs on 3.8. These helpers re-check dependency/version claims against the
+# skill's real imports and the repo `requires-python` floor, so an unfaithful
+# improvement is rolled back instead of shipped.
+
+# Display name (as written in prose) -> import name to look for in scripts.
+# Curated to common analysis libs so the check stays precise (no false positives
+# on plain words like "Python", "GitHub", or "CSV").
+_KNOWN_THIRD_PARTY_LIBS = {
+    "pandas": "pandas",
+    "numpy": "numpy",
+    "scipy": "scipy",
+    "requests": "requests",
+    "pyyaml": "yaml",
+    "yaml": "yaml",
+    "matplotlib": "matplotlib",
+    "seaborn": "seaborn",
+    "scikit-learn": "sklearn",
+    "sklearn": "sklearn",
+    "statsmodels": "statsmodels",
+    "beautifulsoup4": "bs4",
+    "bs4": "bs4",
+    "lxml": "lxml",
+    "openpyxl": "openpyxl",
+    "tabulate": "tabulate",
+    "yfinance": "yfinance",
+    "aiohttp": "aiohttp",
+    "httpx": "httpx",
+}
+
+_NEGATION_RE = re.compile(r"\b(no|not|without|don't|doesn't|isn't|aren't|never|none)\b")
+
+
+def _extract_prerequisites_section(skill_md_text: str) -> str | None:
+    """Return the body of the Prerequisites / Input Requirements section, or None."""
+    lines = skill_md_text.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(r"^##\s+(Prerequisites|Input Requirements)\b", line):
+            start = i + 1
+            break
+    if start is None:
+        return None
+    body: list[str] = []
+    for line in lines[start:]:
+        if re.match(r"^##\s+", line):  # next H2 ends the section
+            break
+        body.append(line)
+    return "\n".join(body)
+
+
+def _skill_import_names(project_root: Path, skill_name: str) -> set[str]:
+    """Return the top-level module names imported anywhere in the skill's code."""
+    imports: set[str] = set()
+    skill_dir = project_root / "skills" / skill_name
+    if not skill_dir.exists():
+        return imports
+    import_re = re.compile(r"^\s*(?:from|import)\s+([a-zA-Z0-9_]+)")
+    for py in skill_dir.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            text = py.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            m = import_re.match(line)
+            if m:
+                imports.add(m.group(1))
+    return imports
+
+
+def _skill_string_literals(project_root: Path, skill_name: str) -> set[str]:
+    """Return string-constant values used anywhere in the skill's code.
+
+    Captures libraries referenced by name instead of imported — e.g. an lxml
+    parser passed as ``BeautifulSoup(html, "lxml")`` or a name handed to
+    ``importlib.import_module`` — so they are not mistaken for unused deps.
+    """
+    literals: set[str] = set()
+    skill_dir = project_root / "skills" / skill_name
+    if not skill_dir.exists():
+        return literals
+    for py in skill_dir.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                literals.add(node.value.strip().lower())
+    return literals
+
+
+def _repo_python_floor(project_root: Path) -> tuple[int, int] | None:
+    """Parse the `requires-python = ">=3.9"` floor from pyproject.toml -> (3, 9)."""
+    pyproject = project_root / "pyproject.toml"
+    if not pyproject.exists():
+        return None
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r'requires-python\s*=\s*"[^"]*?(\d+)\.(\d+)', text)
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)))
+
+
+def check_prerequisites_faithfulness(project_root: Path, skill_name: str) -> list[str]:
+    """Verify a skill's Prerequisites section against its real code.
+
+    Returns a list of human-readable violation strings (empty == faithful).
+    Guards against the two error classes seen in PR #164:
+      1. A known third-party library is listed (in backticks) but no skill file
+         imports or references it by name.
+      2. A `Python 3.x+` floor is stated below the repo's requires-python.
+    """
+    skill_md = project_root / "skills" / skill_name / "SKILL.md"
+    if not skill_md.exists():
+        return []
+    try:
+        section = _extract_prerequisites_section(skill_md.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+    if not section:
+        return []
+
+    violations: set[str] = set()
+    # A library counts as used if it is imported OR referenced by name as a
+    # string literal (covers parser backends like the lxml engine that
+    # BeautifulSoup loads from the string "lxml").
+    satisfied = _skill_import_names(project_root, skill_name) | _skill_string_literals(
+        project_root, skill_name
+    )
+
+    # 1) Library faithfulness. Only inspect backtick-quoted tokens, which is how
+    #    these SKILL.md files declare dependencies, and skip negated lines such
+    #    as "No `pandas` required".
+    for raw_line in section.splitlines():
+        if not raw_line.strip() or _NEGATION_RE.search(raw_line.lower()):
+            continue
+        for raw_token in re.findall(r"`([^`]+)`", raw_line):
+            m = re.match(r"[a-z0-9_.\-]+", raw_token.strip().lower())
+            if not m:
+                continue
+            display = m.group(0)
+            import_name = _KNOWN_THIRD_PARTY_LIBS.get(display)
+            if import_name and import_name not in satisfied and display not in satisfied:
+                violations.add(
+                    f"Prerequisites list `{raw_token.strip()}` but no skill file "
+                    f"imports or references `{import_name}`."
+                )
+
+    # 2) Python version floor must be >= the repo's requires-python.
+    repo_floor = _repo_python_floor(project_root)
+    version_match = re.search(r"Python\s+(\d+)\.(\d+)\s*\+", section)
+    if version_match and repo_floor:
+        stated = (int(version_match.group(1)), int(version_match.group(2)))
+        if stated < repo_floor:
+            violations.add(
+                f"Prerequisites claim Python {stated[0]}.{stated[1]}+ but repo "
+                f"requires-python is >={repo_floor[0]}.{repo_floor[1]}."
+            )
+
+    return sorted(violations)
+
+
 def apply_improvement(
     project_root: Path,
     skill_name: str,
@@ -502,10 +679,25 @@ def apply_improvement(
             )
             _rollback(project_root, skill_name, branch_name)
             return None
+
+        # Snapshot pre-existing faithfulness issues so the gate below only blocks
+        # NEW unfaithful claims introduced by this improvement, not pre-existing
+        # debt in an unrelated part of the skill.
+        pre_faithfulness = check_prerequisites_faithfulness(project_root, skill_name)
+
         prompt = (
             f"Improve the skill '{skill_name}' in skills/{skill_name}/ based on these findings:\n\n"
             + "\n".join(f"- {item}" for item in improvements[:10])
             + "\n\nMake minimal, targeted edits to address the findings. Do not change unrelated code."
+            + "\n\nKeep every claim faithful to the actual code:\n"
+            "- Before writing a Prerequisites/dependency/environment section, grep this skill's "
+            "scripts for real `import` statements. List only libraries that are actually imported; "
+            "never copy a dependency list from another skill (e.g. do not list `pandas` unless a "
+            "script imports it).\n"
+            "- For the Python version, use the repository's `requires-python` floor in pyproject.toml; "
+            "do not guess a lower version.\n"
+            "- Standard-library modules (csv, json, io, ...) are not third-party dependencies; do not "
+            "list them as installable requirements."
         )
 
         result = subprocess.run(
@@ -541,6 +733,27 @@ def apply_improvement(
                 "Re-score (%d) not better than pre-score (%d); rolling back.",
                 re_score,
                 pre_score,
+            )
+            _rollback(project_root, skill_name, branch_name)
+            return None
+
+        # Code-faithfulness gate: a higher structural score is not enough. Block
+        # any dependency/version claim this improvement INTRODUCED that doesn't
+        # match the skill's real imports or the repo Python floor — the exact
+        # failure in PR #164 ("Python 3.8+ with pandas" on a skill that imports
+        # neither). Pre-existing issues are excluded so the gate doesn't punish
+        # an unrelated improvement for latent debt.
+        new_violations = [
+            v
+            for v in check_prerequisites_faithfulness(project_root, skill_name)
+            if v not in pre_faithfulness
+        ]
+        if new_violations:
+            logger.warning(
+                "Code-faithfulness gate failed for '%s' (improvement introduced "
+                "unfaithful Prerequisites claims); rolling back:\n  - %s",
+                skill_name,
+                "\n  - ".join(new_violations),
             )
             _rollback(project_root, skill_name, branch_name)
             return None

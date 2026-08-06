@@ -107,6 +107,13 @@ JSON fixture (one is shipped at `scripts/tests/fixtures/dry_run_minimal.json`).
    --bars-fixture <path>` against a JSON fixture
    (`scripts/tests/fixtures/intraday_bars/`).
 
+Phase 3 trigger detection is not an order instruction. Before any manual
+short entry, confirm borrow/locate availability, SEC Rule 201 SSR state,
+broker short-sale controls, and the broker's current intraday margin or
+day-trading controls. FINRA replaced the old pattern-day-trader day-count
+and $25,000 minimum-equity requirements with intraday margin standards
+effective 2026-06-04, with broker phase-in allowed through 2027-10-20.
+
 Phase 3 is **idempotent**: each run replays the full session bars
 from open up to `now_et` (or `--now-et` override), so re-running
 during the same minute produces the same state. `prior_state` is
@@ -121,7 +128,33 @@ Read three top-level fields per ticker:
 - `blocking_manual_reasons`: must all be resolved before pulling the
   trigger.
 - `advisory_manual_reasons`: heads-up only, e.g.
-  `manual_locate_required` (always set), `warning:too_early_to_short`.
+  `manual_locate_required` (always set), `warning:too_early_to_short`,
+  `warning:recent_earnings_catalyst` (last earnings within
+  `--earnings-catalyst-window-days`, default 10 trading days — flag the
+  move as event-driven rather than pure technical blow-off).
+
+### Earnings-aware screening
+
+Phase 1 fetches the FMP earnings calendar once per run (single call,
+not per-symbol) and emits two earnings-aware checks:
+
+- `--exclude-earnings-within-days` (default 2 calendar days, forward) —
+  hard invalidation when next earnings is within the window. Matches
+  the legacy `earnings_blackout_days` semantic.
+- `--earnings-catalyst-window-days` (default 10 trading days, backward)
+  — soft warning `recent_earnings_catalyst` when last earnings is
+  within the window. Routes to Phase 2 as an advisory manual reason
+  without forcing `trade_allowed_without_manual: false`.
+
+Per-candidate output exposes `last_earnings_date`, `next_earnings_date`,
+`trading_days_since_earnings` (TRADING days), `earnings_within_days`
+(CALENDAR days, forward), `earnings_blackout_days` (configured threshold),
+and `earnings_in_blackout_window`. The legacy `earnings_within_2d` is
+kept for backward compatibility.
+
+Top-level dates: `as_of` is the planning date (Phase 2 contract — never
+mutate); `run_date` mirrors it; `market_data_as_of` is the latest bar
+date used for technical metrics (differs from `as_of` on weekend runs).
 
 ## Output Format
 

@@ -301,7 +301,7 @@ This may indicate bear market conditions or a universe lacking growth stocks:
 | `--api-key` | No | `$FMP_API_KEY` | FMP API key |
 | `--max-candidates` | No | `40` | Max stocks to analyze (use 35 for free tier) |
 | `--top` | No | `20` | Number of top results in the report |
-| `--output-dir` | No | `.` | Output directory for JSON and Markdown reports |
+| `--output-dir` | No | `reports/` | Output directory for JSON and Markdown reports |
 | `--universe` | No | S&P 500 top 40 | Custom list of ticker symbols |
 | `--rs-benchmark` | No | `^GSPC` | Benchmark symbol for L-component RS (e.g. SPY, QQQ, IWM). M component still uses ^GSPC for EMA scale consistency. |
 | `--disable-rs` | No | `false` | Skip L component calculation. Saves the per-stock 365-day price fetch and the custom benchmark fetch (when applicable). L is fixed at neutral 50. |

@@ -3,15 +3,16 @@ layout: default
 title: "Scenario Analyzer"
 grand_parent: 日本語
 parent: スキルガイド
-nav_order: 36
+nav_order: 42
 lang_peer: /en/skills/scenario-analyzer/
 permalink: /ja/skills/scenario-analyzer/
+generated: false
 ---
 
 # Scenario Analyzer
 {: .no_toc }
 
-ニュースヘッドラインを入力として18ヶ月シナリオを分析するスキルです。scenario-analystエージェントで主分析を実行し、strategy-reviewerエージェントでセカンドオピニオンを取得。1次・2次・3次影響、推奨銘柄、レビューを含む包括的レポートを日本語で生成します。
+ニュース見出しから 18か月程度の中長期シナリオを作り、一次・二次・三次影響、セクター影響、関連銘柄、反対意見を整理するスキルです。
 {: .fs-6 .fw-300 }
 
 <span class="badge badge-free">API不要</span>
@@ -30,24 +31,30 @@ permalink: /ja/skills/scenario-analyzer/
 
 ## 1. 概要
 
-このスキルは、ニュースヘッドラインを起点として中長期（18ヶ月）の投資シナリオを分析します。2つの専門エージェント（`scenario-analyst`と`strategy-reviewer`）を順次呼び出し、多角的な分析と批判的レビューを統合した包括的なレポートを生成します。
+Scenario Analyzer は、単一のニュース見出しを起点に、中長期の投資シナリオを構造化します。主分析を行う `scenario-analyst` と、批判的な二次レビューを行う `strategy-reviewer` を組み合わせ、過度に一方向へ寄った結論を避けます。
+
+出力には次を含めます。
+
+- 18か月の base / bull / bear シナリオ
+- 1st order、2nd order、3rd order impact
+- 影響を受けるセクターと銘柄候補
+- 確信度、主要な不確実性、反証条件
+- セカンドオピニオンによる弱点レビュー
 
 ---
 
-## 2. 使用タイミング
+## 2. 使う場面
 
-以下の場合にこのスキルを使用してください：
+- 大きなニュースの中長期影響を整理したい
+- 金利、関税、地政学、資源、規制、技術革新などの波及効果を見たい
+- 関連セクターや二次受益銘柄を洗い出したい
+- 1つの見方だけでなく、反対シナリオも含めたい
+- 投資テーマの初期仮説を作りたい
 
-- ニュースヘッドラインから中長期の投資影響を分析したい
-- 18ヶ月後のシナリオを複数構築したい
-- セクター・銘柄への影響を1次/2次/3次で整理したい
-- セカンドオピニオンを含む包括的な分析が必要
-- 日本語でのレポート出力が必要
+例:
 
-**使用例：**
-```
+```text
 /scenario-analyzer "Fed raises interest rates by 50bp, signals more hikes ahead"
-/scenario-analyzer "China announces new tariffs on US semiconductors"
 /scenario-analyzer "OPEC+ agrees to cut oil production by 2 million barrels per day"
 ```
 
@@ -55,277 +62,41 @@ permalink: /ja/skills/scenario-analyzer/
 
 ## 3. 前提条件
 
-- **APIキー：** 不要
-- **Python 3.9+** 推奨
-- **Claude Code 必須：** このスキルは `agents/` ディレクトリに定義された2つの専門エージェント（`scenario-analyst` と `strategy-reviewer`）を使用します。これらは Claude Code 環境でのみ利用可能です。`.skill` パッケージにはエージェントは含まれません。Claude Web アプリでは、エージェントなしで単一パスで全分析を実行します。
+- API キー不要
+- WebSearch / WebFetch を使える環境
+- `scenario-analyst` と `strategy-reviewer` エージェントを呼び出せること
+- 見出し、または分析対象イベントの短い説明
 
 ---
 
-## 4. クイックスタート
+## 4. ワークフロー
 
-```bash
-Read references/headline_event_patterns.md
-Read references/sector_sensitivity_matrix.md
-Read references/scenario_playbooks.md
-```
-
----
-
-## 5. ワークフロー
-
-### Phase 1: 準備
-
-#### ステップ1.1: ヘッドライン解析
-
-ユーザーから入力されたヘッドラインを解析します。
-
-1. **ヘッドライン確認**
-   - 引数としてヘッドラインが渡されているか確認
-   - 渡されていない場合はユーザーに入力を求める
-
-2. **キーワード抽出**
-   - 主要なエンティティ（企業名、国名、機関名）
-   - 数値データ（金利、価格、数量）
-   - アクション（引き上げ、引き下げ、発表、合意等）
-
-#### ステップ1.2: イベントタイプ分類
-
-ヘッドラインを以下のカテゴリに分類：
-
-| カテゴリ | 例 |
-|---------|-----|
-| 金融政策 | FOMC、ECB、日銀、利上げ、利下げ、QE/QT |
-| 地政学 | 戦争、制裁、関税、貿易摩擦 |
-| 規制・政策 | 環境規制、金融規制、独禁法 |
-| テクノロジー | AI、EV、再エネ、半導体 |
-| コモディティ | 原油、金、銅、農産物 |
-| 企業・M&A | 買収、破綻、決算、業界再編 |
-
-#### ステップ1.3: リファレンス読み込み
-
-イベントタイプに基づき、関連するリファレンスを読み込みます：
-
-```
-Read references/headline_event_patterns.md
-Read references/sector_sensitivity_matrix.md
-Read references/scenario_playbooks.md
-```
-
-**リファレンス内容：**
-- `headline_event_patterns.md`: 過去のイベントパターンと市場反応
-- `sector_sensitivity_matrix.md`: イベント×セクターの影響度マトリクス
-- `scenario_playbooks.md`: シナリオ構築のテンプレートとベストプラクティス
+1. 見出しから主体、地域、数値、政策・企業アクションを抽出する
+2. イベント種別を分類する
+3. 参照資料を読み、類似パターンやセクター感応度を確認する
+4. primary analysis で 18か月シナリオを作る
+5. strategy review で仮説の弱点、過剰推論、見落としを指摘する
+6. 統合レポートとして Markdown にまとめる
 
 ---
 
-### Phase 2: エージェント呼び出し
+## 5. 出力の読み方
 
-#### ステップ2.1: scenario-analyst 呼び出し
+| セクション | 見るポイント |
+|---|---|
+| Event summary | 何が起きたか、どの前提で分析したか |
+| Scenario set | base / bull / bear の分岐 |
+| Impact layers | 直接影響、波及影響、長期テーマ |
+| Stock ideas | あくまで調査候補であり、売買推奨ではない |
+| Critical review | 反証条件、弱い前提、逆方向リスク |
 
-Agent toolを使用してメイン分析エージェントを呼び出します。
-
-```
-Agent tool:
-- subagent_type: "scenario-analyst"
-- prompt: |
-    以下のヘッドラインについて18ヶ月シナリオ分析を実行してください。
-
-    ## 対象ヘッドライン
-    [入力されたヘッドライン]
-
-    ## イベントタイプ
-    [分類結果]
-
-    ## リファレンス情報
-    [読み込んだリファレンスの要約]
-
-    ## 分析要件
-    1. WebSearchで過去2週間の関連ニュースを収集
-    2. Base/Bull/Bearの3シナリオを構築（確率合計100%）
-    3. 1次/2次/3次影響をセクター別に分析
-    4. ポジティブ/ネガティブ影響銘柄を各3-5銘柄選定（米国市場のみ）
-    5. 全て日本語で出力
-```
-
-**期待する出力：**
-- 関連ニュース記事リスト
-- 3シナリオ（Base/Bull/Bear）の詳細
-- セクター影響分析（1次/2次/3次）
-- 銘柄推奨リスト
-
-#### ステップ2.2: strategy-reviewer 呼び出し
-
-scenario-analystの分析結果を受けて、レビューエージェントを呼び出します。
-
-```
-Agent tool:
-- subagent_type: "strategy-reviewer"
-- prompt: |
-    以下のシナリオ分析をレビューしてください。
-
-    ## 対象ヘッドライン
-    [入力されたヘッドライン]
-
-    ## 分析結果
-    [scenario-analystの出力全文]
-
-    ## レビュー要件
-    以下の観点でレビューを実施：
-    1. 見落とされているセクター/銘柄
-    2. シナリオ確率配分の妥当性
-    3. 影響分析の論理的整合性
-    4. 楽観/悲観バイアスの検出
-    5. 代替シナリオの提案
-    6. タイムラインの現実性
-
-    建設的かつ具体的なフィードバックを日本語で出力してください。
-```
-
-**期待する出力：**
-- 見落としの指摘
-- シナリオ確率への意見
-- バイアスの指摘
-- 代替シナリオの提案
-- 最終推奨事項
+銘柄候補はそのまま注文に使わず、`technical-analyst`、`us-stock-analysis`、`position-sizer` などで追加確認します。
 
 ---
 
-### Phase 3: 統合・レポート生成
+## 6. 注意点
 
-#### ステップ3.1: 結果統合
-
-両エージェントの出力を統合し、最終投資判断を作成します。
-
-**統合ポイント：**
-1. レビューで指摘された見落としを補完
-2. 確率配分の調整（必要な場合）
-3. バイアスを考慮した最終判断
-4. 具体的なアクションプランの策定
-
-#### ステップ3.2: レポート生成
-
-以下の形式で最終レポートを生成し、ファイルに保存します。
-
-**保存先：** `reports/scenario_analysis_<topic>_YYYYMMDD.md`
-
-```markdown
-# ヘッドライン・シナリオ分析レポート
-
-**分析日時**: YYYY-MM-DD HH:MM
-**対象ヘッドライン**: [入力されたヘッドライン]
-**イベントタイプ**: [分類カテゴリ]
-
----
-
-## 1. 関連ニュース記事
-[scenario-analystが収集したニュースリスト]
-
-## 2. 想定シナリオ概要（18ヶ月後まで）
-
-### Base Case（XX%確率）
-[シナリオ詳細]
-
-### Bull Case（XX%確率）
-[シナリオ詳細]
-
-### Bear Case（XX%確率）
-[シナリオ詳細]
-
-## 3. セクター・業種への影響
-
-### 1次的影響（直接的）
-[影響テーブル]
-
-### 2次的影響（バリューチェーン・関連産業）
-[影響テーブル]
-
-### 3次的影響（マクロ・規制・技術）
-[影響テーブル]
-
-## 4. ポジティブ影響が見込まれる銘柄（3-5銘柄）
-[銘柄テーブル]
-
-## 5. ネガティブ影響が見込まれる銘柄（3-5銘柄）
-[銘柄テーブル]
-
-## 6. セカンドオピニオン・レビュー
-[strategy-reviewerの出力]
-
-## 7. 最終投資判断・示唆
-
-### 推奨アクション
-[レビューを踏まえた具体的アクション]
-
-### リスク要因
-[主要リスクの列挙]
-
-### モニタリングポイント
-[フォローすべき指標・イベント]
-
----
-**生成**: scenario-analyzer skill
-**エージェント**: scenario-analyst, strategy-reviewer
-```
-
-#### ステップ3.3: レポート保存
-
-1. `reports/` ディレクトリが存在しない場合は作成
-2. `scenario_analysis_<topic>_YYYYMMDD.md` として保存（例: `scenario_analysis_venezuela_20260104.md`）
-3. 保存完了をユーザーに通知
-4. **プロジェクトルートに直接保存しないこと**
-
----
-
-## 6. リソース
-
-**リファレンス：**
-
-- `skills/scenario-analyzer/references/headline_event_patterns.md`
-- `skills/scenario-analyzer/references/scenario_playbooks.md`
-- `skills/scenario-analyzer/references/sector_sensitivity_matrix.md`
-
----
-
-## 7. 重要な注意事項
-
-### 言語
-- 全ての分析・出力は**日本語**で行う
-- 銘柄ティッカーは英語表記を維持
-
-### 対象市場
-- 銘柄選定は**米国市場上場銘柄のみ**
-- ADR含む
-
-### 時間軸
-- シナリオは**18ヶ月**を対象
-- 0-6ヶ月/6-12ヶ月/12-18ヶ月の3フェーズで記述
-
-### 確率配分
-- Base + Bull + Bear = **100%**
-- 各シナリオの確率は根拠とともに記述
-
-### セカンドオピニオン
-- **必須**で実行（strategy-reviewerを常に呼び出す）
-- レビュー結果は最終判断に反映
-
-### 出力先（重要）
-- **必ず** `reports/` ディレクトリ配下に保存すること
-- パス: `reports/scenario_analysis_<topic>_YYYYMMDD.md`
-- 例: `reports/scenario_analysis_fed_rate_hike_20260104.md`
-- `reports/` ディレクトリが存在しない場合は作成すること
-- **プロジェクトルートに直接保存してはならない**
-
----
-
-## 8. 品質チェックリスト
-
-レポート完成前に以下を確認：
-
-- [ ] ヘッドラインが正しく解析されているか
-- [ ] イベントタイプの分類が適切か
-- [ ] 3シナリオの確率合計が100%か
-- [ ] 1次/2次/3次影響の論理的繋がりがあるか
-- [ ] 銘柄選定に具体的な根拠があるか
-- [ ] strategy-reviewerのレビューが含まれているか
-- [ ] レビューを踏まえた最終判断が記載されているか
-- [ ] レポートが正しいパスに保存されたか
+- ニュースが新しい場合、事実関係の確認を優先してください。
+- 18か月シナリオは仮説であり、短期売買シグナルではありません。
+- 推奨銘柄は「調査候補」です。価格、バリュエーション、チャート、リスク許容度を別途確認します。
+- セカンドオピニオンの指摘を必ず読み、片側のストーリーに寄りすぎないようにします。

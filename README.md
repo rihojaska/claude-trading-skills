@@ -38,49 +38,85 @@ It is not designed for fully automated trading, signal outsourcing, or short-ter
 
 ## Recommended Starting Path
 
-If you are new to this repository, start with the Core + Satellite workflow:
+New users should start with one of these operational workflows. Each link points to a machine-readable manifest under [`workflows/`](workflows/) that names the exact skills, decision gates, and artifacts in order.
 
-1. **Core Portfolio Weekly**
-   - Review long-term holdings, dividend stocks, ETFs, and portfolio concentration.
-2. **Market Regime Daily**
-   - Check whether current market conditions allow new risk.
-3. **Swing Opportunity Daily**
-   - Look for swing trade candidates only when market conditions are favorable.
-4. **Trade Memory Loop**
-   - Record the thesis, entry plan, result, and lessons learned.
-5. **Monthly Performance Review**
-   - Review what worked, what failed, and which rules should change.
+| Goal | Workflow | Anchor Skills | API Profile |
+| --- | --- | --- | --- |
+| 15-minute daily market check | [`market-regime-daily`](workflows/market-regime-daily.yaml) | market-breadth-analyzer, uptrend-analyzer, exposure-coach | No API for basic path |
+| Weekly long-term portfolio review | [`core-portfolio-weekly`](workflows/core-portfolio-weekly.yaml) ([sample](examples/workflows/core-portfolio-weekly/sample-run/)) | portfolio-manager, kanchi-dividend-review-monitor, trader-memory-core | Alpaca required; manual CSV is a degraded fallback |
+| Find swing candidates only when risk is allowed | [`swing-opportunity-daily`](workflows/swing-opportunity-daily.yaml) ([sample](examples/workflows/swing-opportunity-daily/sample-run/)) | vcp-screener, drawdown-circuit-breaker, technical-analyst, position-sizer, trader-memory-core, pre-trade-discipline-gate | FMP for screeners; local state for risk and discipline gates |
+| Record and learn from every closed trade | [`trade-memory-loop`](workflows/trade-memory-loop.yaml) | trader-memory-core, signal-postmortem | No API for manual path |
+| Review monthly performance and adjust rules | [`monthly-performance-review`](workflows/monthly-performance-review.yaml) ([sample](examples/workflows/monthly-performance-review/sample-run/)) | trader-memory-core, signal-postmortem, backtest-expert | No API for manual path |
 
-## Choose Your Starting Point
+See [`workflows/README.md`](workflows/README.md) for how to read a manifest and run it manually. For a one-page "which workflow fits my situation?" guide, see [Find Your Workflow](docs/en/find-your-workflow.md) ([日本語](docs/ja/find-your-workflow.md)).
 
-| Goal | Start Here |
-| --- | --- |
-| I want a 15-minute daily market check | Market Regime Daily |
-| I want to review my long-term portfolio | Core Portfolio Weekly |
-| I want to find swing candidates | Swing Opportunity Daily |
-| I want to improve my trading process | Trade Memory Loop |
-| I want to research new strategies | Strategy Research |
+New here? Follow [Your First Week](docs/en/your-first-week.md) ([日本語](docs/ja/your-first-week.md)) from installation through a no-paid-data-API market check, first journal entry, and first weekly review.
+
+### What This Actually Costs
+
+Claude Web Skills are currently available on Free, Pro, Max, Team, and
+Enterprise accounts; see Anthropic's
+[current Skills help](https://support.claude.com/en/articles/12512180-use-skills-in-claude)
+because access can change. Claude Code has separate account requirements, and
+the Claude.ai Free plan does not include it; see the
+[Claude Code setup guide](https://code.claude.com/docs/en/getting-started).
+FMP, FINVIZ Elite, and Alpaca are optional data or broker integrations for
+specific workflows. The five-skill starter path below works with public CSVs,
+chart screenshots, and local files, so it does not require a paid market-data
+API subscription.
+
+### No API Key Starter Path
+
+If you do not have FMP / FINVIZ / Alpaca subscriptions, start with these five skills and run them manually:
+
+1. `market-breadth-analyzer` — public CSV breadth scoring; no API key
+2. `uptrend-analyzer` — public CSV uptrend participation; no API key
+3. `position-sizer` — pure calculation; no I/O
+4. `trader-memory-core` — local YAML journaling
+5. `signal-postmortem` — review framework
+
+This path lets you review market conditions, size trades, journal decisions, and review outcomes **without paid data APIs**. Note: "no API" does not mean "no external data" — these skills still need public CSVs, chart screenshots, or local files. See each skill's `integrations:` entry in [`skills-index.yaml`](skills-index.yaml) for exact input requirements.
+
+> **Canonical source:** [`skills-index.yaml`](skills-index.yaml) is the authoritative index of all skills. If this README, `CLAUDE.md`, or docs disagree with the index, the index is correct. The same applies to multi-skill workflows — [`workflows/*.yaml`](workflows/) is canonical.
 
 ## Repository Layout
 - `skills/<skill-name>/` – Source folder for each trading skill. Contains `SKILL.md`, reference material, and any helper scripts.
+- `skills-index.yaml` – Canonical metadata index for every skill (id, category, integrations, workflows back-references).
+- `workflows/` – Operational workflow manifests for the Core + Satellite routines (canonical, validator-enforced via `--strict-workflows`).
 - `skill-packages/` – Pre-built `.skill` archives ready to upload to Claude's web app **Skills** tab.
-- `docs/` – Documentation site content and generated skill pages.
-- `scripts/` – Repository-level automation and maintenance scripts.
-- `skillsets/` – Planned skillset manifests for bundled workflows.
-- `workflows/` – Planned workflow manifests for operational routines.
+- `docs/` – Documentation site content, generated skill pages, and `docs/dev/metadata-and-workflow-schema.md` (schema spec).
+- `scripts/` – Repository-level automation, including the schema validator and one-shot bootstrap helper.
+- `skillsets/` – Purpose-specific install bundles defining required / recommended / optional skills for major goals (4 core skillsets shipped: market-regime, core-portfolio, swing-opportunity, trade-memory; consumed by the Navigator).
 
 ## Getting Started
+
+First time here? Read the [FAQ](docs/en/faq.md) for plan, cost, safety, and scope
+answers.
+
 ### Use with Claude Web App
 1. Download the `.skill` file that matches the skill you want from `skill-packages/`.
-2. Open Claude in your browser, go to **Settings → Skills**, and upload the ZIP (see Anthropic's [Skills launch post](https://www.anthropic.com/news/skills) for feature overview).
-3. Enable the skill inside the conversation where you need it.
+2. For an individual account, open **Settings > Capabilities** and enable **Code execution and file creation**. Team and Enterprise users may need an organization owner to enable Skills.
+3. Open **Customize > Skills**, upload the ZIP, confirm it appears in the list, and enable it if needed (see Anthropic's [current Skills help](https://support.claude.com/en/articles/12512180-use-skills-in-claude)).
 
 ### Use with Claude Code (desktop or CLI)
 1. Clone or download this repository.
-2. Copy the desired skill folder (e.g., `backtest-expert`) into your Claude Code **Skills** directory (open Claude Code → **Settings → Skills → Open Skills Folder**, per the [Claude Code Skills documentation](https://docs.claude.com/en/docs/claude-code/skills)).
-3. Restart or reload Claude Code so the new skill is detected.
+2. Copy the desired skill folder (e.g., `backtest-expert`) to `~/.claude/skills/` for personal use or `.claude/skills/` inside a project (see the [Claude Code setup guide](https://code.claude.com/docs/en/getting-started)).
+3. Claude Code detects changes in an existing skills directory. Restart it only if you created the top-level skills directory after the session started.
 
-> Tip: The source folders and ZIPs contain identical content. Edit a source folder if you want to customize a skill, then re-zip it before uploading to the web app.
+> Tip: `.skill` packages are built from the source folders with tests and local build artifacts omitted. Edit a source folder if you want to customize a skill, then run `python3 scripts/package_skills.py --skill <skill-name>` before uploading to the web app.
+
+## Companion Work Package
+
+Want a ready-to-run agent-style workflow? See the companion
+[Hermes Trading Research Agent Work Package](https://github.com/tradermonty/hermes-trading-research-agent-work-package).
+
+It packages these skills into a Hermes profile with task-oriented slash-command routines such as
+`/pre-market-routine`, `/after-close-review`, `/trade-journal`, `/weekly-portfolio-review`, and
+`/monthly-performance-review`.
+
+This is a research, journaling, and risk-review assistant, **not** an automated trading system.
+It does **not** place orders, provide a signal service, or run hidden scheduled jobs;
+**human decision gates remain central**.
 
 ## Core Skill Areas
 
@@ -91,345 +127,129 @@ This repository contains skills across the following areas:
 | Market Regime | `market-breadth-analyzer`, `uptrend-analyzer`, `exposure-coach` |
 | Core Portfolio | `portfolio-manager`, `value-dividend-screener`, `kanchi-dividend-sop` |
 | Swing Opportunities | `vcp-screener`, `canslim-screener`, `breakout-trade-planner` |
-| Trade Planning | `position-sizer`, `technical-analyst` |
+| Trade Planning | `position-sizer`, `technical-analyst`, `pre-trade-discipline-gate` |
 | Trade Memory | `trader-memory-core`, `signal-postmortem` |
 | Strategy Research | `backtest-expert`, `edge-pipeline-orchestrator` |
 | Advanced Satellite | `parabolic-short-trade-planner`, `earnings-trade-analyzer`, `options-strategy-advisor` |
 
-The detailed catalog below is retained for quick reference. For a more navigable version, use the documentation site.
+The detailed catalog below is **auto-generated** from `skills-index.yaml` by `scripts/generate_catalog_from_index.py`. To update a skill's description, edit its `skills-index.yaml` entry and re-run the generator (`python3 scripts/generate_catalog_from_index.py`). For a more navigable version, use the documentation site.
 
 ## Detailed Skill Catalog
 
-### Market Analysis & Research
+<!-- skills-index:start name="catalog-en" -->
+<!-- This section is auto-generated from skills-index.yaml by scripts/generate_catalog_from_index.py. Do not edit by hand — edit the index and re-run the generator. -->
 
-- **Sector Analyst** (`sector-analyst`)
-  - Fetches sector uptrend ratio data from CSV (no API key required) and analyzes sector rotation patterns based on market cycle theory.
-  - Calculates cyclical vs defensive risk regime scores, identifies overbought/oversold sectors, and estimates the current market cycle phase (Early/Mid/Late Cycle or Recession).
-  - Optionally accepts chart images for supplementary industry-level analysis.
-  - Generates scenario-based probability assessments for sector rotation strategies.
+### Market Regime
 
-- **Breadth Chart Analyst** (`breadth-chart-analyst`)
-  - Analyzes S&P 500 Breadth Index and US Stock Market Uptrend Stock Ratio charts to assess market health and positioning.
-  - Provides medium-term strategic and short-term tactical market outlook based on breadth indicators.
-  - Identifies bull market phases (Healthy Breadth, Narrowing Breadth, Distribution) and bear market signals.
-  - Includes detailed breadth interpretation framework and historical pattern references.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Breadth Chart Analyst** (`breadth-chart-analyst`) | This skill should be used when analyzing market breadth charts, specifically the S&P 500 Breadth Index (200-Day MA based) and the US Stock Market Uptrend Stock Ratio charts. | `chart_image` **required** | production |
+| **COT Contrarian Detector** (`cot-contrarian-detector`) | Detects crowded speculative (large-speculator) positioning in CFTC futures markets using Commitment of Traders data, implementing step 1 of Jason Shapiro's contrarian methodology. | `fmp` **required** | production |
+| **Crypto Regime Analyzer** (`crypto-regime-analyzer`) | Quantifies crypto market regime health (0-100 composite, 100 = risk-on) from six components using free keyless public data. | `coingecko` **required**, `binance_funding` _recommended_, `prices_json` optional | beta |
+| **Downtrend Duration Analyzer** (`downtrend-duration-analyzer`) | Analyze historical downtrend durations and generate interactive HTML histograms showing typical correction lengths by sector and market cap. | `local_calculation` — | production |
+| **Exposure Coach** (`exposure-coach`) | Generate a one-page Market Posture summary with net exposure ceiling, growth-vs-value bias, participation breadth, and new-entry-allowed vs cash-priority recommendation by integrating signals from breadth, regime, and flow analysis skills. | `local_calculation` — | production |
+| **FTD Detector** (`ftd-detector`) | Detects Follow-Through Day (FTD) signals for market bottom confirmation using William O'Neil's methodology. | `fmp` **required** | production |
+| **IBD Distribution Day Monitor** (`ibd-distribution-day-monitor`) | Detect IBD-style Distribution Days for QQQ/SPY (close down at least 0.2% on higher volume), track 25-session expiration and 5% invalidation, count d5/d15/d25 clusters, classify market risk (NORMAL/CAUTION/HIGH/SEVERE), and emit TQQQ/QQQ... | `fmp` **required** | production |
+| **Macro Regime Detector** (`macro-regime-detector`) | Detect structural macro regime transitions (1-2 year horizon) using cross-asset ratio analysis. | `yfinance_or_csv` _recommended_ | production |
+| **Market Breadth Analyzer** (`market-breadth-analyzer`) | Quantifies market breadth health using TraderMonty's public CSV data. | `public_csv` **required** | production |
+| **Market Environment Analysis** (`market-environment-analysis`) | Comprehensive market environment analysis and reporting tool. | `websearch` **required**, `chart_image` optional | production |
+| **Market News Analyst** (`market-news-analyst`) | This skill should be used when analyzing recent market-moving news events and their impact on equity markets and commodities. | `websearch` **required** | production |
+| **Market Top Detector** (`market-top-detector`) | Detects market top probability using O'Neil Distribution Days, Minervini Leading Stock Deterioration, and Monty Defensive Sector Rotation. | `public_csv` **required** | production |
+| **News Reaction Failure Analyzer** (`news-reaction-failure-analyzer`) | Judges whether a market failed to react to news favorable to a crowded speculative position, implementing step 2 of Jason Shapiro's contrarian methodology with a Monte-Carlo-verified drift-significance verdict test. | `fmp` **required**, `websearch` **required** | production |
+| **Sector Analyst** (`sector-analyst`) | This skill should be used when analyzing sector rotation patterns and market cycle positioning. | `chart_image` **required** | production |
+| **Uptrend Analyzer** (`uptrend-analyzer`) | Analyzes market breadth using Monty's Uptrend Ratio Dashboard data to diagnose the current market environment. | `public_csv` **required** | production |
+| **US Market Bubble Detector** (`us-market-bubble-detector`) | Evaluates market bubble risk through quantitative data-driven analysis using the revised Minsky/Kindleberger framework v2.1. | `user_input` **required** | production |
 
-- **Technical Analyst** (`technical-analyst`)
-  - Analyzes weekly price charts for stocks, indices, cryptocurrencies, and forex pairs using pure technical analysis.
-  - Identifies trends, support/resistance levels, chart patterns, and momentum indicators without fundamental bias.
-  - Generates scenario-based probability assessments with specific trigger levels for trend changes.
-  - References cover Elliott Wave, Dow Theory, Japanese candlesticks, and technical indicator interpretation.
+### Core Portfolio
 
-- **Market News Analyst** (`market-news-analyst`)
-  - Analyzes recent market-moving news events from the past 10 days using automated WebSearch/WebFetch collection.
-  - Focuses on FOMC decisions, central bank policy, mega-cap earnings, geopolitical events, and commodity market drivers.
-  - Produces impact-ranked reports using quantitative scoring framework (Price Impact × Breadth × Forward Significance).
-  - References include trusted news sources guide, event pattern analysis, and geopolitical-commodity correlations.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Dividend Growth Pullback Screener** (`dividend-growth-pullback-screener`) | Use this skill to find high-quality dividend growth stocks (12%+ annual dividend growth, 1.5%+ yield) that are experiencing temporary pullbacks, identified by RSI oversold conditions (RSI ≤40). | `fmp` **required**, `finviz` _recommended_ | production |
+| **Kanchi Dividend Review Monitor** (`kanchi-dividend-review-monitor`) | Monitor dividend portfolios with Kanchi-style forced-review triggers (T1-T5) and convert anomalies into OK/WARN/REVIEW states without auto-selling. | `fmp` _recommended_ | production |
+| **Kanchi Dividend SOP** (`kanchi-dividend-sop`) | Convert Kanchi-style dividend investing into a repeatable US-stock operating procedure. | `fmp` _recommended_ | production |
+| **Kanchi Dividend US Tax Accounting** (`kanchi-dividend-us-tax-accounting`) | Provide US dividend tax and account-location workflow for Kanchi-style income portfolios. | `local_calculation` — | production |
+| **Portfolio Manager** (`portfolio-manager`) | Comprehensive portfolio analysis using Alpaca MCP Server integration to fetch holdings and positions, then analyze asset allocation, risk metrics, individual stock positions, diversification, and generate rebalancing recommendations. | `alpaca` **required** | production |
+| **Value Dividend Screener** (`value-dividend-screener`) | Screen US stocks for high-quality dividend opportunities combining value characteristics (P/E ratio under 20, P/B ratio under 2), attractive yields (3% or higher), and consistent growth (dividend/revenue/EPS trending up over 3 years). | `fmp` **required**, `finviz` _recommended_ | production |
 
-- **US Stock Analysis** (`us-stock-analysis`)
-  - Comprehensive US equity research assistant covering fundamentals, technicals, peer comparisons, and investment memo generation.
-  - Analyzes financial metrics, valuation ratios, growth trajectories, and competitive positioning.
-  - Generates structured investment memos with bull/bear cases and risk assessments.
-  - Reference library documents analytical frameworks (`fundamental-analysis.md`, `technical-analysis.md`, `financial-metrics.md`, `report-template.md`).
+### Swing Opportunity
 
-- **Market Environment Analysis** (`market-environment-analysis`)
-  - Guides Claude through comprehensive global macro briefings covering equity indices, FX, commodities, yields, and market sentiment.
-  - Provides structured reporting templates for daily/weekly market reviews with indicator-based assessments.
-  - Includes indicator cheat sheets (`references/indicators.md`) and analysis patterns.
-  - Helper script `scripts/market_utils.py` assists with report formatting and data visualization.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Breakout Trade Planner** (`breakout-trade-planner`) | Generate Minervini-style breakout trade plans from VCP screener output with worst-case risk calculation, portfolio heat management, and Alpaca-compatible order templates (stop-limit bracket for pre-placement, limit bracket for post-confi... | `local_calculation` — | production |
+| **CANSLIM Screener** (`canslim-screener`) | Screen US stocks using William O'Neil's CANSLIM growth stock methodology. | `fmp` **required** | production |
+| **Finviz Screener** (`finviz-screener`) | Build and open FinViz screener URLs from natural language requests. | `finviz` optional | production |
+| **Stockbee Exhaustion Hammer Screener** (`stockbee-exhaustion-hammer-screener`) | Screen US stocks for Stockbee-style selling-exhaustion hammer candidates using quality/liquidity gates, prior momentum, pullback depth, undercut/reclaim, hammer geometry, volume confirmation, market gate, and risk-distance filters. | `fmp` **required**, `prices_json` optional, `profiles_json` optional, `local_calculation` — | beta |
+| **Stockbee Momentum Burst Screener** (`stockbee-momentum-burst-screener`) | Screen US stocks for Stockbee-style 3-5 day momentum burst candidates using 4% breakout, dollar breakout, range expansion, volume expansion, setup quality, and risk-distance filters. | `fmp` **required**, `prices_json` optional, `local_calculation` — | beta |
+| **Theme Detector** (`theme-detector`) | Detect and analyze trending market themes across sectors. | `fmp` optional, `finviz` _recommended_ | production |
+| **VCP Screener** (`vcp-screener`) | Screen S&P 500 stocks for Mark Minervini's Volatility Contraction Pattern (VCP). | `fmp` **required** | production |
 
-- **Market Breadth Analyzer** (`market-breadth-analyzer`)
-  - Quantifies market breadth health using TraderMonty's public CSV data with a data-driven 6-component scoring system (0-100).
-  - Components: Overall Breadth, Sector Participation, Sector Rotation, Momentum, Mean Reversion Risk, and Historical Context.
-  - Measures how broadly the market is participating in a rally or decline (100 = maximum health, 0 = critical weakness).
-  - No API key required - uses freely available CSV data from GitHub.
+### Trade Planning
 
-- **Uptrend Analyzer** (`uptrend-analyzer`)
-  - Diagnoses market breadth health using Monty's Uptrend Ratio Dashboard, tracking ~2,800 US stocks across 11 sectors.
-  - 5-component composite scoring (0-100): Market Breadth, Sector Participation, Sector Rotation, Momentum, Historical Context.
-  - Warning overlay system: Late Cycle and High Selectivity flags tighten exposure guidance and add cautionary actions.
-  - Sector-level fallback: automatically constructs sector summary from timeseries data when sector_summary.csv is unavailable.
-  - No API key required - uses free GitHub CSV data.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Contrarian Setup Gate** (`contrarian-setup-gate`) | Offline synthesis gate that combines COT crowding, news-reaction failure, and weekly price-action confirmation into one actionable setup_status via a fail-closed precedence state machine, implementing the decision center of Jason Shapiro's contrarian methodology. | `local_calculation` — | beta |
+| **Drawdown Circuit Breaker** (`drawdown-circuit-breaker`) | Account-level circuit breaker that reads trader-memory-core state and decides whether new trade risk is allowed today using daily loss limits, losing-streak cooldowns, and weekly/monthly drawdown halts. | `local_calculation` — | beta |
+| **Futures Position Sizer** (`futures-position-sizer`) | Calculate contract-based futures position sizes from a direction, entry, and stop-loss, using a verified 23-market contract-spec table (multiplier, tick size, tick value), implementing step 4 of Jason Shapiro's contrarian pipeline. | `local_calculation` — | beta |
+| **Position Sizer** (`position-sizer`) | Calculate risk-based position sizes for long stock trades. | `local_calculation` — | production |
+| **Pre-Trade Discipline Gate** (`pre-trade-discipline-gate`) | Offline manual-execution checklist gate that blocks planless, oversized, revenge-risk, market-regime-blocked, or circuit-breaker-blocked entries and journals the result. | `local_calculation` — | beta |
+| **Technical Analyst** (`technical-analyst`) | This skill should be used when analyzing weekly price charts for stocks, stock indices, cryptocurrencies, or forex pairs. | `chart_image` **required**, `fmp` optional | production |
+| **US Stock Analysis** (`us-stock-analysis`) | Comprehensive US stock analysis including fundamental analysis (financial metrics, business quality, valuation), technical analysis (indicators, chart patterns, support/resistance), stock comparisons, and investment report generation. | `user_input` **required** | production |
 
-- **Macro Regime Detector** (`macro-regime-detector`)
-  - Detects structural macro regime transitions (1-2 year horizon) using cross-asset ratio analysis.
-  - 6-component analysis: RSP/SPY concentration, yield curve, credit conditions, size factor, equity-bond relationship, and sector rotation.
-  - Identifies regimes: Concentration, Broadening, Contraction, Inflationary, and Transitional states.
-  - FMP API required for cross-asset ETF data (RSP, SPY, IWM, HYG, LQD, TLT, XLE, XLU, etc.).
+### Trade Memory
 
-- **Institutional Flow Tracker** (`institutional-flow-tracker`)
-  - Tracks institutional investor ownership changes using 13F SEC filings data to identify "smart money" accumulation and distribution patterns.
-  - Screens stocks with significant institutional ownership changes (>10-15% QoQ) and analyzes multi-quarter trends.
-  - Tier-based quality framework weights superinvestors (Berkshire, Baupost) 3.0-3.5x vs index funds 0.0-0.5x.
-  - Deep dive analysis on individual stocks: quarterly ownership trends, top holders, new/increased/decreased/closed positions.
-  - Concentration risk analysis and position change categorization (new buyers, increasers, decreasers, exits).
-  - FMP API integration with free tier sufficient for quarterly portfolio reviews (250 calls/day).
-  - Follow specific institutions like Warren Buffett (Berkshire), Cathie Wood (ARK), Bill Ackman (Pershing Square).
-  - Comprehensive reference guides: 13F filings, institutional investor types, interpretation framework with signal strength matrix.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Signal Postmortem** (`signal-postmortem`) | Record and analyze post-trade outcomes for signals generated by edge pipeline and other skills. | `local_calculation` — | production |
+| **Stockbee Setup Fluency Trainer** (`stockbee-setup-fluency-trainer`) | Build a Stockbee-style setup model book from momentum-burst screener candidates, then update 3-day and 5-day forward outcomes with MFE/MAE, stop-hit status, outcome tags, and cohort statistics. | `prices_json` optional, `fmp` optional, `local_calculation` — | beta |
+| **Trade Hypothesis Ideator** (`trade-hypothesis-ideator`) | Generate falsifiable trade strategy hypotheses from market data, trade logs, and journal snippets with ranked hypothesis cards and optional strategy.yaml export. | `local_calculation` — | production |
+| **Trade Performance Coach** (`trade-performance-coach`) | Review closed trades, partial exits, and monthly aggregates for process adherence, risk discipline, execution quality, and evidence-based trading behavior patterns, then produce next-session operating rules. | `local_calculation` — | beta |
+| **Trader Memory Core** (`trader-memory-core`) | Track investment theses across their lifecycle — from screening idea to closed position with postmortem. | `fmp` optional | production |
+| **Weekly Performance Digest** (`weekly-performance-digest`) | Generate a weekly performance summary from closed trades with win rate, expectancy, and pattern analysis. | `local_calculation` — | production |
 
-- **Theme Detector** (`theme-detector`)
-  - Detects trending market themes (bullish and bearish) by analyzing FINVIZ industry/sector performance across multiple timeframes.
-  - 3-dimensional scoring: Theme Heat (0-100, momentum/volume/uptrend/breadth), Lifecycle Maturity (0-100, duration/RSI extremity/price extremes/valuation/ETF proliferation), and Confidence (Low/Medium/High).
-  - Direction-aware analysis: bearish themes scored with equal sensitivity as bullish themes using inverted indicators.
-  - Cross-sector theme detection (AI/Semis, Clean Energy, Gold, Cybersecurity, etc.) and vertical sector concentration identification.
-  - Lifecycle stages: Emerging, Accelerating, Trending, Mature, Exhausting — with representative stocks and proxy ETFs per theme.
-  - Integrates Monty's Uptrend Ratio Dashboard as supplementary breadth signal (3-point evaluation: ratio + MA10 + slope).
-  - No API key required for core functionality (FINVIZ public + yfinance). FMP/FINVIZ Elite optional for enhanced stock selection.
+### Strategy Research
 
-### Economic & Earnings Calendars
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Backtest Expert** (`backtest-expert`) | Expert guidance for systematic backtesting of trading strategies. | `user_input` **required** | production |
+| **Edge Candidate Agent** (`edge-candidate-agent`) | Generate and prioritize US equity long-side edge research tickets from EOD observations, then export pipeline-ready candidate specs for trade-strategy-pipeline Phase I. | `fmp` optional | production |
+| **Edge Concept Synthesizer** (`edge-concept-synthesizer`) | Abstract detector tickets and hints into reusable edge concepts with thesis, invalidation signals, and strategy playbooks before strategy design/export. | `local_calculation` — | production |
+| **Edge Hint Extractor** (`edge-hint-extractor`) | Extract edge hints from daily market observations and news reactions, with optional LLM ideation, and output canonical hints.yaml for downstream concept synthesis and auto detection. | `local_calculation` — | production |
+| **Edge Pipeline Orchestrator** (`edge-pipeline-orchestrator`) | Orchestrate the full edge research pipeline from candidate detection through strategy design, review, revision, and export. | `local_calculation` — | production |
+| **Edge Signal Aggregator** (`edge-signal-aggregator`) | Aggregate and rank signals from multiple edge-finding skills (edge-candidate-agent, theme-detector, sector-analyst, institutional-flow-tracker) into a prioritized conviction dashboard with weighted scoring, deduplication, and contradicti... | `local_calculation` — | production |
+| **Edge Strategy Designer** (`edge-strategy-designer`) | Convert abstract edge concepts into strategy draft variants and optional exportable ticket YAMLs for edge-candidate-agent export/validation. | `local_calculation` — | production |
+| **Edge Strategy Reviewer** (`edge-strategy-reviewer`) | Critically review strategy drafts from edge-strategy-designer for edge plausibility, overfitting risk, sample size adequacy, and execution realism. | `local_calculation` — | production |
+| **Residual Edge Analyzer** (`residual-edge-analyzer`) | Separate strategy return performance into declared baseline exposure and residual edge using HAC regression, rolling stability, baseline sensitivity, and regime diagnostics. | `local_calculation` — | beta |
+| **Scenario Analyzer** (`scenario-analyzer`) | Analyze 18-month scenarios from news headlines via scenario-analyst agent with strategy-reviewer second opinion; outputs primary/secondary/tertiary impact analysis and stock picks. | `websearch` **required** | production |
+| **Stanley Druckenmiller Investment** (`stanley-druckenmiller-investment`) | Druckenmiller Strategy Synthesizer - Integrates 8 upstream skill outputs (Market Breadth, Uptrend Analysis, Market Top, Macro Regime, FTD Detector, VCP Screener, Theme Detector, CANSLIM Screener) into a unified conviction score (0-100),... | `local_calculation` — | production |
+| **Stockbee 20% Study** (`stockbee-20pct-study`) | Build a daily Stockbee-style +20%/-20% mover event study, classify catalysts and setup context, update forward outcomes, and export evidence-backed edge hints without treating movers as buy/sell signals. | `fmp` **required**, `prices_json` optional, `news_events_json` optional, `websearch` optional, `local_calculation` — | beta |
+| **Strategy Pivot Designer** (`strategy-pivot-designer`) | Detect backtest iteration stagnation and generate structurally different strategy pivot proposals when parameter tuning reaches a local optimum. | `local_calculation` — | production |
 
-- **Economic Calendar Fetcher** (`economic-calendar-fetcher`)
-  - Fetches upcoming economic events using Financial Modeling Prep (FMP) API for next 7-90 days.
-  - Retrieves central bank decisions, employment reports (NFP), inflation data (CPI/PPI), GDP releases, and other market-moving indicators.
-  - The script outputs raw JSON or text; the assistant filters events and generates a Markdown report with impact assessment (High/Medium/Low) and market implications analysis.
-  - Supports flexible API key management (environment variable recommended; `--api-key` CLI argument as fallback).
+### Advanced Satellite
 
-- **Earnings Calendar** (`earnings-calendar`)
-  - Retrieves upcoming earnings announcements for US stocks using FMP API with focus on mid-cap+ companies (>$2B market cap).
-  - Organizes earnings by date and timing (Before Market Open, After Market Close, During Market Hours).
-  - Provides clean markdown table format for weekly earnings review and portfolio monitoring.
-  - Flexible API key management supporting CLI, Desktop, and Web environments.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Earnings Trade Analyzer** (`earnings-trade-analyzer`) | Analyze recent post-earnings stocks using a 5-factor scoring system (Gap Size, Pre-Earnings Trend, Volume Trend, MA200 Position, MA50 Position). | `fmp` **required** | production |
+| **Institutional Flow Tracker** (`institutional-flow-tracker`) | Use this skill to track institutional investor ownership changes and portfolio flows using 13F filings data. | `fmp` **required** | production |
+| **Options Strategy Advisor** (`options-strategy-advisor`) | Options trading strategy analysis and simulation tool. | `fmp` optional | production |
+| **Pair Trade Screener** (`pair-trade-screener`) | Statistical arbitrage tool for identifying and analyzing pair trading opportunities. | `fmp` **required** | production |
+| **Parabolic Short Trade Planner** (`parabolic-short-trade-planner`) | Screen US equities for parabolic exhaustion patterns and generate conditional pre-market short plans, then evaluate intraday trigger fires from live 5-min bars. | `fmp` **required**, `alpaca` optional | production |
+| **PEAD Screener** (`pead-screener`) | Screen post-earnings gap-up stocks for PEAD (Post-Earnings Announcement Drift) patterns. | `fmp` **required** | production |
+| **Stockbee Episodic Pivot Analyzer** (`stockbee-episodic-pivot-analyzer`) | Analyze Stockbee-style Day 1 Episodic Pivot candidates from earnings, guidance, M&A, FDA, analyst, contract, product, short-squeeze, and story/theme catalysts using catalyst quality, gap/range expansion, volume shock, neglect/revaluation context, liquidity, and EP-day-low risk. | `catalyst_events_json` **required**, `fmp` optional, `local_calculation` — | beta |
 
-### Strategy & Risk Management
+### Meta / Development Tooling
 
-- **Scenario Analyzer** (`scenario-analyzer`)
-  - Analyzes news headlines to build 18-month scenario projections with sector impacts and stock picks.
-  - Dual-agent architecture: scenario-analyst for primary analysis, strategy-reviewer for second opinion.
-  - Generates comprehensive reports including 1st/2nd/3rd order effects, candidate tickers, and critical review.
-  - No API key required - uses WebSearch for news gathering.
-
-- **Backtest Expert** (`backtest-expert`)
-  - Framework for professional-grade strategy validation with hypothesis definition, parameter robustness checks, and walk-forward testing.
-  - Emphasizes realistic assumptions: slippage modeling, transaction costs, survivorship bias elimination, and out-of-sample validation.
-  - References cover detailed methodology (`references/methodology.md`) and failure post-mortems (`references/failed_tests.md`).
-  - Guides systematic approach from idea generation through production deployment with quality gates.
-
-- **Stanley Druckenmiller Investment Advisor** (`stanley-druckenmiller-investment`)
-  - Encodes Druckenmiller's investment philosophy for macro positioning, liquidity analysis, and asymmetric risk/reward assessment.
-  - Focuses on "bet big when you have high conviction" approach with strict loss-cutting discipline.
-  - Reference pack provides philosophy deep dives, market analysis workflows, and historical case studies (content in Japanese and English).
-  - Emphasizes macro theme identification, technical confirmation, and position sizing strategies.
-
-- **US Market Bubble Detector** (`us-market-bubble-detector`) - **v2.1 Updated**
-  - Data-driven bubble risk assessment using revised Minsky/Kindleberger framework with mandatory quantitative metrics (Put/Call, VIX, margin debt, breadth, IPO data).
-  - Two-phase evaluation: Quantitative scoring (0-12 points) → Strict qualitative adjustment (0-3 points, reduced from +5 in v2.0).
-  - Confirmation bias prevention with measurable evidence requirements for all qualitative adjustments.
-  - Granular risk phases: Normal (0-4) → Caution (5-7) → Elevated Risk (8-9) → Euphoria (10-12) → Critical (13-15).
-  - Actionable risk budgets and profit-taking strategies for each phase with specific short-selling criteria.
-  - Supplemented by historical case files, quick-reference checklists (JP/EN), and implementation guide with strict scoring criteria.
-
-- **Options Strategy Advisor** (`options-strategy-advisor`)
-  - Educational options trading tool providing theoretical pricing, strategy analysis, and risk management guidance using Black-Scholes model.
-  - Calculates all Greeks (Delta, Gamma, Theta, Vega, Rho) and supports 17+ options strategies (covered calls, spreads, iron condors, straddles, etc.).
-  - Uses FMP API for free stock data + Black-Scholes pricing to simulate strategies without expensive real-time options data ($99-500/month).
-  - P/L simulation and visualization for comparing strategies side-by-side with earnings strategy integration.
-  - Theoretical prices approximate market mid-prices; users can input actual IV from broker for better accuracy.
-  - Ideal for learning options mechanics, understanding Greeks, and strategy planning before live trading.
-
-- **Portfolio Manager** (`portfolio-manager`)
-  - Comprehensive portfolio analysis and management with Alpaca MCP Server integration for real-time holdings data.
-  - Multi-dimensional analysis: Asset allocation, sector diversification, risk metrics (beta, volatility, drawdown), and performance review.
-  - Position-level review flags such as HOLD/ADD/TRIM/SELL candidates for user review based on thesis validation and valuation.
-  - Generates detailed rebalancing review plans so the user can decide manually which actions, if any, to take.
-  - Supports model portfolios (Conservative/Moderate/Growth/Aggressive) for benchmark comparison.
-  - Requires Alpaca brokerage account (paper or live) and configured Alpaca MCP Server; manual data entry also supported.
-
-- **Position Sizer** (`position-sizer`)
-  - Calculates risk-based position sizes for long stock trades using Fixed Fractional, ATR-based, and Kelly Criterion methods.
-  - Applies portfolio constraints (max position %, max sector %) and identifies binding constraints.
-  - Two output modes: "shares" mode (with entry/stop) returns a calculated share-count candidate; "budget" mode (Kelly only) returns a risk-budget candidate.
-  - Generates JSON + markdown reports with calculation details, constraint analysis, and review notes.
-  - No API key required — pure calculation, works offline.
-
-- **Parabolic Short Trade Planner** (`parabolic-short-trade-planner`)
-  - Daily screener for Qullamaggie-style Parabolic Short candidates (5-factor weighted score: MA Extension 30% / Acceleration 25% / Volume Climax 20% / Range Expansion 15% / Liquidity 10%) with mode-aware invalidation (`safe_largecap` vs `classic_qm`).
-  - Pre-market plan generator emits three conditional triggers per candidate (5-min ORL break, first red 5-min, VWAP fail) with `entry_hint` / `stop_hint` formula strings — no baked-in shares; Phase 3 evaluates `shares_formula` at trigger fire.
-  - Phase 3 intraday trigger monitor (`monitor_intraday_trigger.py`) — one-shot evaluator that fetches 5-min bars (Alpaca live or fixture), walks per-trigger FSM (ORL: 3-state, First Red: 4-state with same-bar invalidation tie-break, VWAP fail: 6-state), and writes `intraday_monitor` JSON with concrete `entry_actual` / `stop_actual` / `shares_actual` when triggered. Replay-deterministic (idempotent across re-runs); `triggered` is non-terminal so post-trigger reclaims still flip to `invalidated`. Wrap in `watch -n 60` or 5-min cron.
-  - Broker-agnostic short-inventory adapter; Alpaca implementation is `requests`-direct (no SDK), encoding the ETB-only short policy and surfacing HTB names as `borrow_inventory_unavailable` → `plan_status: watch_only`.
-  - SEC Rule 201 (SSR) state tracker that inherits `prior_close` from the screener output (regular-session close, not aftermarket) and persists per-symbol state for next-day carryover.
-  - Manual confirmation reasons split into `blocking_manual_reasons` (HTB borrow, SSR active, premarket high/low unavailable) vs `advisory_manual_reasons` (`manual_locate_required` is always advisory). FMP API required; Alpaca required for Phase 3 live data (paper account works), optional for Phase 2 borrow checks.
-
-- **Edge Candidate Agent** (`edge-candidate-agent`)
-  - Converts daily market observations into reproducible research tickets and exports Phase I-compatible candidate specs for `trade-strategy-pipeline`.
-  - Generates `strategy.yaml` + `metadata.json` artifacts from structured research tickets with interface contract validation (`edge-finder-candidate/v1`).
-  - Supports two entry families: `pivot_breakout` (with VCP detection) and `gap_up_continuation` (with gap detection).
-  - Includes preflight validation against pipeline schema with `uv run` subprocess fallback for cross-environment compatibility.
-  - Guardrails enforce schema bounds (risk limits, exit rules, non-empty conditions) and deterministic metadata with interface versioning.
-  - No API key required — operates on local YAML files and validates against local pipeline repository.
-
-- **Trade Hypothesis Ideator** (`trade-hypothesis-ideator`)
-  - Generates 1-5 falsifiable hypothesis cards from structured strategy context, market context, trade logs, and journal evidence.
-  - Two-pass workflow: Pass 1 builds `evidence_summary.json`; Pass 2 validates raw hypotheses, ranks cards, and emits JSON + markdown reports.
-  - Guardrails enforce field completeness, banned phrase detection, duplicate detection, and constraint-violation checks.
-  - Exports `pursue` hypotheses to `strategy.yaml` + `metadata.json` compatible with `edge-finder-candidate/v1` (`pivot_breakout`, `gap_up_continuation` only).
-  - No API key required — runs entirely on local JSON/YAML artifacts.
-
-- **Strategy Pivot Designer** (`strategy-pivot-designer`)
-  - Detects backtest iteration stagnation and generates structurally different strategy pivot proposals when parameter tuning reaches a local optimum.
-  - Four deterministic triggers: improvement plateau, overfitting proxy, cost defeat, and tail risk — mapped from `evaluate_backtest.py` output.
-  - Three pivot techniques: assumption inversion, archetype switch, and objective reframe across 8 canonical strategy archetypes.
-  - Novelty scoring via Jaccard distance with deterministic tiebreaks ensures reproducible proposal ranking.
-  - Outputs `strategy_draft`-compatible YAML with `pivot_metadata` extension; exportable drafts include candidate-agent ticket YAML.
-  - No API key required — operates on local JSON/YAML files from backtest-expert and edge-strategy-designer.
-
-- **Edge Strategy Reviewer** (`edge-strategy-reviewer`)
-  - Deterministic quality gate for strategy drafts produced by `edge-strategy-designer`.
-  - Evaluates 8 criteria (C1-C8): edge plausibility, overfitting risk, sample adequacy, regime dependency, exit calibration, risk concentration, execution realism, and invalidation quality.
-  - Weighted scoring (0-100) with PASS/REVISE/REJECT verdicts and export eligibility determination.
-  - Precise threshold detection penalizes curve-fitted conditions; annual opportunity estimation flags overly restrictive strategies.
-  - REVISE verdicts include concrete revision instructions for the feedback loop.
-  - No API key required — operates on local YAML files from edge-strategy-designer.
-
-- **Edge Pipeline Orchestrator** (`edge-pipeline-orchestrator`)
-  - Orchestrates the full edge research pipeline end-to-end: auto-detection, hints, concept synthesis, strategy design, critical review, and export.
-  - Review-revision feedback loop (max 2 iterations): PASS/REJECT accumulated across iterations, REVISE drafts revised and re-reviewed, remaining REVISE downgraded to research_probe.
-  - Export eligibility gate: only PASS + export_ready_v1 + exportable entry family drafts proceed to candidate export.
-  - All upstream skills called via subprocess (no cross-skill imports) with pipeline manifest tracking full execution trace.
-  - Supports resume-from-drafts, review-only, and dry-run modes.
-  - No API key required — orchestrates local YAML/JSON files across edge skills.
-
-- **Edge Signal Aggregator** (`edge-signal-aggregator`)
-  - Aggregates outputs from edge-candidate-agent, edge-concept-synthesizer, theme-detector, sector-analyst, institutional-flow-tracker, and edge-hint-extractor.
-  - Applies configurable weighting, signal deduplication, recency adjustment, and contradiction handling to produce a ranked conviction dashboard.
-  - Supports multiple upstream schema variants (for example `priority_score`, `support.avg_priority_score`, `themes.all`, `heat/theme_heat`) for robust cross-skill integration.
-  - Exports JSON + markdown reports with provenance (`contributing_skills`), contradiction logs, and deduplication logs.
-  - No API key required — operates on local JSON/YAML outputs from upstream edge skills.
-
-- **Trader Memory Core** (`trader-memory-core`)
-  - Persistent state layer that tracks investment theses from screening idea to closed position with postmortem.
-  - Bundles screener → analysis → position sizing → portfolio management outputs into a single thesis object.
-  - Supports lifecycle management (IDEA → ENTRY_READY → ACTIVE → CLOSED), position attachment, review scheduling, and MAE/MFE analysis.
-  - Integrates with kanchi-dividend-sop, earnings-trade-analyzer, vcp-screener, pead-screener, canslim-screener, and edge-candidate-agent.
-
-- **Exposure Coach** (`exposure-coach`)
-  - Synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, sector-analyst, and institutional-flow-tracker into a unified exposure decision.
-  - Answers the core question: "How much capital should I commit to equities right now?" before any individual stock analysis.
-  - Generates a one-page Market Posture summary with exposure ceiling (0-100%), growth-vs-value bias, participation breadth assessment, and a posture review flag (NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY).
-  - Accepts partial inputs — missing upstream files reduce confidence level but do not block execution.
-  - FMP API key optional (needed only when institutional-flow-tracker data is included).
-
-- **Signal Postmortem** (`signal-postmortem`)
-  - Records and analyzes post-trade outcomes for signals generated by edge pipeline, screeners, and other skills.
-  - Classifies outcomes into TRUE_POSITIVE, FALSE_POSITIVE, MISSED_OPPORTUNITY, or REGIME_MISMATCH categories.
-  - Generates weight adjustment feedback for edge-signal-aggregator and skill improvement backlog entries.
-  - Supports batch processing of matured signals (5-day and 20-day holding periods) and manual outcome recording.
-  - Aggregate statistics by skill, ticker, and time period for periodic signal quality audits.
-  - FMP API key optional (for fetching realized returns; manual price entry also supported).
-
-### Market Timing & Bottom Detection
-
-- **Market Top Detector** (`market-top-detector`)
-  - Detects market top probability using O'Neil Distribution Days, Minervini Leading Stock Deterioration, and Monty Defensive Rotation.
-  - 6-component tactical timing system for identifying distribution and topping patterns.
-
-- **IBD Distribution Day Monitor** (`ibd-distribution-day-monitor`)
-  - Daily IBD-style Distribution Day detection for QQQ/SPY (close down at least 0.2% on higher volume) with 25-session expiration and 5% invalidation.
-  - Tracks active records with `age_sessions` and counts `d5/d15/d25` clusters for risk classification (NORMAL/CAUTION/HIGH/SEVERE).
-  - Emits TQQQ/QQQ exposure review flags (TQQQ cuts faster due to 3x leverage) and trailing stop reference levels.
-  - Complementary to Market Top Detector: this skill is single-component, ETF-direct, and TQQQ-aware while Market Top Detector is a 6-component composite.
-  - FMP API required.
-
-- **Downtrend Duration Analyzer** (`downtrend-duration-analyzer`)
-  - Analyzes historical downtrend durations (peak-to-trough) and generates interactive HTML histograms segmented by sector and market cap.
-  - Rolling window peak/trough detection with configurable depth and duration filters.
-  - FMP API required.
-
-- **FTD Detector** (`ftd-detector`)
-  - Detects Follow-Through Day (FTD) signals for market bottom confirmation using William O'Neil's methodology.
-  - Dual-index tracking (S&P 500 + NASDAQ) with state machine for rally attempt, FTD qualification, and post-FTD health monitoring.
-  - Complementary to Market Top Detector: this skill is offensive (bottom confirmation) while Market Top Detector is defensive (distribution detection).
-  - Generates quality score (0-100) with exposure guidance for re-entering the market after corrections.
-  - FMP API required for index price data.
-
-### Earnings Momentum Screening
-
-- **Earnings Trade Analyzer** (`earnings-trade-analyzer`)
-  - Scores recent post-earnings stocks using a 5-factor weighted system: Gap Size (25%), Pre-Earnings Trend (30%), Volume Trend (20%), MA200 Position (15%), MA50 Position (10%).
-  - Assigns A/B/C/D grades (A: 85+, B: 70-84, C: 55-69, D: <55) with composite score 0-100.
-  - BMO/AMC timing-aware gap calculation — different base prices depending on when earnings were announced.
-  - Optional entry quality filter excludes low-win-rate patterns (low price range, extreme gap + high score combinations).
-  - API call budget management with `--max-api-calls` flag (default: 200) and automatic candidate trimming.
-  - Outputs JSON with `schema_version: "1.0"` for downstream consumption by PEAD Screener.
-  - FMP API required (free tier sufficient for typical 2-day lookback screening).
-
-- **PEAD Screener** (`pead-screener`)
-  - Screens post-earnings gap-up stocks for PEAD (Post-Earnings Announcement Drift) patterns using weekly candle analysis.
-  - Stage-based monitoring: MONITORING → SIGNAL_READY (red candle found) → BREAKOUT (price breaks above red candle high) → EXPIRED (>5 weeks).
-  - 4-component scoring: Setup Quality (30%), Breakout Strength (25%), Liquidity (25%), Risk/Reward (20%).
-  - Two input modes: Mode A (FMP earnings calendar, standalone) and Mode B (earnings-trade-analyzer JSON output, pipeline).
-  - Weekly candle aggregation using ISO week (Monday start) with earnings week splitting and partial week handling.
-  - Liquidity filters: ADV20 >= $25M, avg volume >= 1M shares, price >= $10.
-  - Trade setup output: entry price, stop (red candle low), target (2R), risk/reward ratio.
-  - FMP API required (free tier sufficient for 14-day lookback screening).
-
-### Stock Screening & Selection
-
-- **VCP Screener** (`vcp-screener`)
-  - Screens S&P 500 stocks for Mark Minervini's Volatility Contraction Pattern (VCP).
-  - Identifies Stage 2 uptrend stocks forming tight bases with contracting volatility near breakout pivot points.
-  - Two-axis scoring: separates pattern quality from execution readiness (state caps prevent chasing extended stocks).
-  - Multi-stage filtering: Trend Template → VCP Base Detection → Contraction Analysis → Pivot Point Calculation.
-  - FMP API required (free tier sufficient for default screening of top 100 candidates).
-
-- **CANSLIM Stock Screener** (`canslim-screener`) - **Phase 3.1**
-  - Screens US stocks using William O'Neil's proven CANSLIM growth stock methodology for identifying multi-bagger candidates.
-  - **Phase 3.1** implements all 7 components (100% coverage) with **multi-period weighted Relative Strength**: C (Current Earnings), A (Annual Growth), N (Newness/New Highs), S (Supply/Demand), **L (Leadership / multi-period RS)**, I (Institutional Sponsorship), M (Market Direction).
-  - L component uses 3m / 6m / 12m weighted RS (`0.40 × rel_3m + 0.30 × rel_6m + 0.30 × rel_12m`) vs configurable benchmark (`--rs-benchmark`, default `^GSPC`).
-  - Composite scoring (0-100) with O'Neil's original weights: C 15%, A 20%, N 15%, S 15%, **L 20%**, I 10%, M 5%.
-  - Volume-based accumulation/distribution analysis (S component) and institutional ownership tracking (I component) with **automatic Finviz fallback**.
-  - Bear market protection: M component gates long-entry consideration (M=0 triggers "raise cash" warning).
-  - `--disable-rs` flag skips L for API budget savings (L fixed at neutral 50).
-  - JSON output now includes RS-specific fields: `rs_rating`, `rs_rank_percentile`, `rs_3m_return` / `rs_6m_return` / `rs_12m_return`, `rs_benchmark`, `rs_benchmark_relative_return`, `rs_component_score`, `benchmark_52w_performance`. Markdown adds a Summary Table for quick scanning. Schema version `3.1`.
-
-- **Value Dividend Screener** (`value-dividend-screener`)
-  - Screens US stocks for high-quality dividend opportunities using Financial Modeling Prep (FMP) API.
-  - Multi-phase filtering: Value characteristics (P/E ≤20, P/B ≤2) + Income (Yield ≥3.5%) + Growth (3-year dividend/revenue/EPS uptrends).
-  - Advanced analysis: Dividend sustainability (payout ratios, FCF coverage), financial health (D/E, liquidity), quality scores (ROE, margins).
-  - Composite scoring system ranks stocks by overall attractiveness balancing value, growth, and quality factors.
-  - Generates top 20 ranked stocks with detailed fundamental analysis and portfolio construction guidance.
-  - Includes comprehensive screening methodology documentation and FMP API usage guide.
-
-- **Dividend Growth Pullback Screener** (`dividend-growth-pullback-screener`)
-  - Finds high-quality dividend growth stocks (12%+ annual dividend growth, 1.5%+ yield) experiencing temporary pullbacks.
-  - Combines fundamental dividend analysis with technical timing indicators (RSI ≤40 oversold conditions).
-  - Targets stocks with exceptional dividend growth rates that compound wealth through dividend increases rather than high current yield.
-  - Two-stage screening approach: FINVIZ Elite for fast RSI pre-screening + FMP API for detailed fundamental analysis.
-  - Optimized for long-term dividend growth investors seeking entry opportunities during short-term market weakness.
-  - Generates ranked lists of quality dividend growers at attractive technical entry points.
-
-- **Kanchi Dividend SOP** (`kanchi-dividend-sop`)
-  - Converts Kanchi-style 5-step dividend investing into a repeatable US-stock workflow.
-  - Covers screening, deep-dive quality checks, valuation mapping, one-off profit filters, and pullback entry planning.
-  - Includes reusable defaults for safety thresholds, valuation interpretation, and one-page stock memo output.
-  - Designed as the first step in the Kanchi dividend workflow stack.
-
-- **Kanchi Dividend Review Monitor** (`kanchi-dividend-review-monitor`)
-  - Implements forced-review anomaly detection for T1-T5 triggers with deterministic `OK/WARN/REVIEW` outputs.
-  - Focuses on alerting and review-ticket generation, never auto-selling.
-  - Includes a local rule-engine script (`build_review_queue.py`) and unit tests for trigger boundaries.
-  - Designed as the ongoing monitoring layer after candidate selection.
-
-- **Kanchi Dividend US Tax Accounting** (`kanchi-dividend-us-tax-accounting`)
-  - Provides US dividend tax classification and account-location workflow for income portfolios.
-  - Covers qualified vs ordinary assumptions, holding-period checks, and account placement tradeoffs.
-  - Includes templates for annual planning memos and unresolved tax-assumption tracking.
-  - Designed as the portfolio-implementation layer after screening and monitoring.
-
-- **Pair Trade Screener** (`pair-trade-screener`)
-  - Statistical arbitrage tool for identifying and analyzing pair trading opportunities using cointegration testing.
-  - Tests for long-term equilibrium relationships between stock pairs within same sector or industry.
-  - Calculates hedge ratios, mean-reversion speed (half-life), and generates z-score-based entry/exit signals.
-  - Market-neutral strategy profiting from relative price movements regardless of overall market direction.
-  - Supports sector-wide screening and custom pair analysis with statistical rigor (ADF tests, correlation analysis).
-  - FMP API integration with JSON output for structured results and further analysis.
-
-- **FinViz Screener** (`finviz-screener`)
-  - Translates natural-language stock screening requests (Japanese/English) into FinViz screener filter codes and opens the results in Chrome.
-  - Supports 500+ filter codes across fundamentals (P/E, dividend, growth, margins), technicals (RSI, SMA, patterns), and descriptives (sector, market cap, country).
-  - **Theme & Sub-theme cross-screening:** Combine FinViz's 30+ investment themes and 268 sub-themes with any filter. Screen for cross-sector narratives like "AI × Logistics", "Data Centers × Power Infrastructure", or "Cybersecurity × Cloud" — something traditional sector/industry filters cannot do. Use `--themes` and `--subthemes` to mix multiple themes in a single query (e.g., `--themes "artificialintelligence,cybersecurity" --filters "cap_midover"`).
-  - Auto-detects FINVIZ Elite from `$FINVIZ_API_KEY` environment variable; falls back to public screener when not set.
-  - Includes 14 pre-built screening recipes (high dividend value, small-cap growth, oversold large-caps, breakout candidates, AI/theme investing, etc.).
-  - No API key required for basic use (public FinViz screener). FINVIZ Elite optional for enhanced features.
+| Skill | Summary | Integrations | Status |
+|---|---|---|---|
+| **Data Quality Checker** (`data-quality-checker`) | Validate data quality in market analysis documents and blog articles before publication. | `local_calculation` — | production |
+| **Dual Axis Skill Reviewer** (`dual-axis-skill-reviewer`) | Review skills in any project using a dual-axis method: (1) deterministic code-based checks (structure, scripts, tests, execution safety) and (2) LLM deep review findings. | `local_calculation` — | production |
+| **Earnings Calendar** (`earnings-calendar`) | This skill retrieves upcoming earnings announcements for US stocks using the Financial Modeling Prep (FMP) API. | `fmp` **required** | production |
+| **Economic Calendar Fetcher** (`economic-calendar-fetcher`) | Fetch upcoming economic events and data releases using FMP API. | `fmp` **required** | production |
+| **FXMacroData Calendar** (`fxmacrodata-calendar`) | Fetch official-source macro release-calendar events using FXMacroData for trade planning and event-risk filters. | `fxmacrodata` optional | beta |
+| **Skill Designer** (`skill-designer`) | Design new Claude skills from structured idea specifications. | `local_calculation` — | production |
+| **Skill Idea Miner** (`skill-idea-miner`) | Mine Claude Code session logs for skill idea candidates. | `local_calculation` — | production |
+| **Skill Integration Tester** (`skill-integration-tester`) | Validate multi-skill workflows defined in CLAUDE.md by checking skill existence, inter-skill data contracts (JSON schema compatibility), file naming conventions, and handoff integrity. | `local_calculation` — | production |
+| **Trading Skills Navigator** (`trading-skills-navigator`) | Recommend the right workflow, skillset, API profile, and setup path from a natural-language trading goal. | `local_calculation` — | production |
+<!-- skills-index:end name="catalog-en" -->
 
 ## Additional Workflow Examples
 
@@ -454,7 +274,7 @@ The main Core + Satellite starting path is described above. The examples below s
 4. Use **Backtest Expert** to validate entry/exit strategies before position sizing
 
 ### Strategic Positioning
-1. Use **Stanley Druckenmiller Investment Advisor** for macro theme identification
+1. Use **Stanley Druckenmiller Investment** for macro theme identification
 2. Use **Economic Calendar Fetcher** to time entries around major data releases
 3. Use **Breadth Chart Analyst** and **Technical Analyst** for confirmation signals
 4. Use **US Market Bubble Detector** for risk management and profit-taking guidance
@@ -647,7 +467,10 @@ launchctl start com.trade-analysis.skill-generation-daily
 ## Customization & Contribution
 - Update `SKILL.md` files to tweak trigger descriptions or capability notes; ensure the frontmatter name matches the folder name when zipping.
 - Extend reference documents or add scripts inside each skill folder to support new workflows.
-- When distributing updates, regenerate the matching `.skill` file in `skill-packages/` so web-app users get the latest version.
+- When distributing updates, regenerate the matching `.skill` file in `skill-packages/` so web-app users get the latest version:
+  ```bash
+  python3 scripts/package_skills.py --skill <skill-name>
+  ```
 
 ## API Requirements
 

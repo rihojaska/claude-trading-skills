@@ -77,6 +77,14 @@ Browse the full catalog in [Skill Catalog]({{ '/en/skill-catalog/' | relative_ur
 
 ---
 
+## Operational Workflows
+
+For multi-skill routines (Core + Satellite), see [Workflows]({{ '/en/workflows/' | relative_url }}). Each workflow names the exact skills, decision gates, and artifacts in order — auto-generated from the canonical YAML manifests.
+
+[Skillsets]({{ '/en/skillsets/' | relative_url }}) is the companion "what to install for a goal" layer — category-scoped skill bundles tied to those workflows, auto-generated from `skillsets/*.yaml`.
+
+---
+
 ## Get Started
 
 New here? Visit [Getting Started]({{ '/en/getting-started/' | relative_url }}) for installation instructions, API key setup, and your first skill tutorial.

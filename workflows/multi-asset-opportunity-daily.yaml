@@ -1,0 +1,189 @@
+schema_version: 1
+id: multi-asset-opportunity-daily
+display_name: Multi-Asset Opportunity Daily
+display_name_ja: マルチアセット投資機会の日次確認
+cadence: daily
+estimated_minutes: 45
+target_users:
+  - part-time-swing-trader
+  - growth-investor
+  - macro-discretionary-trader
+difficulty: intermediate
+api_profile: mixed
+
+when_to_run: >-
+  Only after market-regime-daily has produced a non-restrictive exposure
+  decision. Sweeps macro + themes + news to surface multi-asset ideas
+  (equities, commodities-via-equity-proxies, options expressions) and
+  synthesizes them into ranked hypothesis cards.
+when_to_run_ja: >-
+  market-regime-daily が非制限的な exposure_decision を出した後にのみ実行する。
+  マクロ、テーマ、ニュースを横断して、株式、株式プロキシ経由の商品、
+  オプション表現の投資アイデアを抽出し、優先順位付きの仮説カードにまとめる。
+when_not_to_run: >-
+  Do not run when the latest market-regime-daily exposure_decision is
+  cash-priority. Do not treat hypothesis cards as buy/sell signals — they
+  carry manual_review_required and must pass human sign-off before any
+  capital moves. Forex output is research-only; never feed it into a broker.
+when_not_to_run_ja: >-
+  最新の market-regime-daily の exposure_decision が cash-priority の場合は
+  実行しない。仮説カードを売買シグナルとして扱わない。カードには
+  manual_review_required があり、資金を動かす前に人間の承認が必要である。
+  外国為替の出力は調査専用とし、ブローカーには決して連携しない。
+
+required_skills:
+  - macro-regime-detector
+  - theme-detector
+  - trade-hypothesis-ideator
+  - position-sizer
+  - trader-memory-core
+optional_skills:
+  - market-news-analyst
+  - market-environment-analysis
+  - sector-analyst
+  - scenario-analyzer
+  - stanley-druckenmiller-investment
+
+# Informational only — validator does NOT enforce inter-workflow ordering.
+prerequisite_workflows:
+  - id: market-regime-daily
+    artifact: exposure_decision
+    rationale: >-
+      Multi-asset opportunity scanning requires a non-restrictive exposure
+      posture. Skip on cash-priority days; reduce scope on restrict days.
+    rationale_ja: >-
+      マルチアセットの投資機会を探索するには、非制限的なエクスポージャー方針が
+      必要である。cash-priority の日は見送り、restrict の日は対象範囲を縮小する。
+
+artifacts:
+  - id: macro_regime_brief
+    schema_id: macro_regime_report
+    produced_by_step: 1
+    required: true
+    downstream_hints:
+      - swing-opportunity-daily
+      - monthly-performance-review
+
+  - id: hot_themes
+    schema_id: screen_candidate
+    produced_by_step: 2
+    required: true
+    downstream_hints:
+      - swing-opportunity-daily
+
+  - id: catalyst_news_brief
+    schema_id: scenario_analysis
+    produced_by_step: 3
+    required: false
+
+  - id: hypothesis_cards
+    schema_id: trade_thesis
+    produced_by_step: 4
+    required: true
+    downstream_hints:
+      - swing-opportunity-daily
+      - trade-memory-loop
+
+  - id: sized_hypotheses
+    schema_id: position_sizing_plan
+    produced_by_step: 5
+    required: true
+
+  - id: opportunity_journal_entries
+    schema_id: journal_entry
+    produced_by_step: 6
+    required: true
+    downstream_hints:
+      - trade-memory-loop
+      - monthly-performance-review
+
+steps:
+  - step: 1
+    name: Refresh macro regime context
+    name_ja: マクロレジームの状況を更新する
+    skill: macro-regime-detector
+    produces:
+      - macro_regime_brief
+    decision_gate: false
+
+  - step: 2
+    name: Detect hot themes + sector rotation
+    name_ja: 注目テーマとセクターローテーションを検出する
+    skill: theme-detector
+    consumes:
+      - macro_regime_brief
+    produces:
+      - hot_themes
+    decision_gate: false
+
+  - step: 3
+    name: Scan news + catalyst landscape
+    name_ja: ニュースとカタリストの状況を調査する
+    skill: market-news-analyst
+    optional: true
+    consumes:
+      - hot_themes
+    produces:
+      - catalyst_news_brief
+    decision_gate: false
+
+  - step: 4
+    name: Synthesize ranked hypothesis cards
+    name_ja: 優先順位付きの仮説カードを作成する
+    skill: trade-hypothesis-ideator
+    consumes:
+      - macro_regime_brief
+      - hot_themes
+      - catalyst_news_brief
+    produces:
+      - hypothesis_cards
+    decision_gate: true
+    decision_question: >-
+      For each hypothesis, does layer 1 (macro) align with layer 2 (theme)
+      and is what-is-priced-in still favorable? Reject any card where the
+      gap to consensus is unclear or already closed.
+    decision_question_ja: >-
+      各仮説で、第1層（マクロ）は第2層（テーマ）と整合し、市場への織り込み状況は
+      まだ有利か。コンセンサスとの差が不明確、またはすでに解消済みのカードは却下する。
+
+  - step: 5
+    name: Apply risk-based sizing to hypothesis cards
+    name_ja: 仮説カードにリスク基準のポジションサイズを適用する
+    skill: position-sizer
+    consumes:
+      - hypothesis_cards
+    produces:
+      - sized_hypotheses
+    decision_gate: false
+
+  - step: 6
+    name: Persist as IDEA / ENTRY_READY entries
+    name_ja: IDEA / ENTRY_READY の記録として保存する
+    skill: trader-memory-core
+    consumes:
+      - hypothesis_cards
+      - sized_hypotheses
+    produces:
+      - opportunity_journal_entries
+    decision_gate: true
+    decision_question: >-
+      Which hypotheses should be promoted from IDEA to ENTRY_READY, which
+      stay as IDEA pending more confirmation, and which are rejected?
+    decision_question_ja: >-
+      どの仮説を IDEA から ENTRY_READY に進め、どれを追加確認待ちの IDEA に
+      とどめ、どれを却下するか。
+
+manual_review:
+  - Confirm the regime brief does not contradict the exposure_decision from market-regime-daily.
+  - Confirm each hypothesis has a written thesis AND a kill criterion.
+  - Confirm position sizing respects portfolio risk caps (per-position and per-sector).
+  - For forex-related output, confirm research_only=true; never wire to a broker.
+  - Confirm IDEA → ENTRY_READY transitions are explicit and reviewed.
+manual_review_ja:
+  - マクロレジーム概要が market-regime-daily の exposure_decision と矛盾しないことを確認する。
+  - 各仮説に文章化された投資根拠と撤退条件の両方があることを確認する。
+  - ポジションサイズが銘柄別・セクター別のポートフォリオリスク上限を守っていることを確認する。
+  - 外国為替関連の出力は research_only=true であることを確認し、ブローカーには決して連携しない。
+  - IDEA から ENTRY_READY への移行が明示され、レビュー済みであることを確認する。
+
+journal_destination: trader-memory-core

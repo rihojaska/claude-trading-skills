@@ -85,17 +85,17 @@ Screener Output → IDEA → ENTRY_READY → ACTIVE → CLOSED
 
 ```bash
 # Step 1: Register screener output as thesis
-python3 skills/trader-memory-core/scripts/thesis_ingest.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py ingest \
   --source kanchi-dividend-sop \
   --input reports/kanchi_entry_signals_2026-03-14.json \
   --state-dir state/theses/
 
 # Step 2: Query your theses
-python3 skills/trader-memory-core/scripts/thesis_store.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py store \
   --state-dir state/theses/ list --status IDEA
 
 # Step 3: Generate summary statistics
-python3 skills/trader-memory-core/scripts/thesis_review.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py review \
   --state-dir state/theses/ summary
 ```
 
@@ -109,13 +109,13 @@ Run the ingest script with the source screener name and its JSON output file:
 
 ```bash
 # From kanchi-dividend-sop
-python3 skills/trader-memory-core/scripts/thesis_ingest.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py ingest \
   --source kanchi-dividend-sop \
   --input reports/kanchi_entry_signals_2026-03-14.json \
   --state-dir state/theses/
 
 # From earnings-trade-analyzer
-python3 skills/trader-memory-core/scripts/thesis_ingest.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py ingest \
   --source earnings-trade-analyzer \
   --input reports/earnings_trade_scored_2026-03-14.json \
   --state-dir state/theses/
@@ -184,7 +184,7 @@ The report must have `mode: "shares"` (budget mode is rejected).
 Check which theses need attention:
 
 ```bash
-python3 skills/trader-memory-core/scripts/thesis_review.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py review \
   --state-dir state/theses/ review-due --as-of 2026-04-15
 ```
 
@@ -216,7 +216,7 @@ close(state_dir, thesis_id,
 Then generate the postmortem:
 
 ```bash
-python3 skills/trader-memory-core/scripts/thesis_review.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py review \
   --state-dir state/theses/ postmortem th_aapl_div_20260314_a3f1
 ```
 
@@ -311,3 +311,6 @@ Each thesis is stored as a YAML file in `state/theses/`:
 
 **Schema:**
 - `skills/trader-memory-core/schemas/thesis.schema.json` -- JSON Schema for thesis validation
+
+**Worked example:**
+- `examples/workflows/trade-memory-loop/sample-run-full-path/` -- End-to-end Plan -> Trade -> Record -> Postmortem -> Backtest -> Journal sample run

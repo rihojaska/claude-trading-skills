@@ -36,9 +36,10 @@ Theme Detectorは、FINVIZの業種・セクターパフォーマンスデータ
 
 | 次元 | スケール | 意味 |
 |------|---------|------|
-| **Theme Heat** | 0-100 | テーマの強度（モメンタム、出来高、上昇トレンド比率、ブレッド） |
-| **Lifecycle Maturity** | Emerging / Accelerating / Trending / Mature / Exhausting | テーマの成熟度（持続期間、極端度、バリュエーション、ETF本数） |
-| **Confidence** | Low / Medium / High | 検出の信頼度（定量的データとナラティブの一致度） |
+| **Theme Heat v2** | 0-100 | テーマの強度（モメンタム、出来高、上昇トレンド比率、ブレッド、任意の個別株リーダーシップ証拠） |
+| **Theme Match Quality** | 0-100 | テーマ一致の特異性（業種参加、明示的な銘柄バスケット、proxy ETF確認、任意のオフライン・ナラティブスコア） |
+| **Lifecycle Maturity** | Emerging / Accelerating / Trending / Mature / Exhausting | テーマの成熟度（履歴ベースの持続期間、極端度、バリュエーション、ETF本数） |
+| **Confidence** | Low / Medium / High | 検出の信頼度（定量データ、カバレッジ、リーダーシップ証拠、ナラティブの一致度） |
 
 **主な特徴:**
 - 14以上のクロスセクターテーマを定義済み（AI/半導体、クリーンエネルギー、サイバーセキュリティ、ゴールド、バイオテク等）
@@ -46,6 +47,8 @@ Theme Detectorは、FINVIZの業種・セクターパフォーマンスデータ
 - ライフサイクルステージ分類: Emerging → Accelerating → Trending → Mature → Exhausting
 - ETF増殖スコアリング: ETFが多いテーマは成熟度が高い（クラウデッドトレード警告）
 - Monty's Uptrend Ratio Dashboardとの統合
+- `--scan-hits` による 5D+20%、EP9M、レンジ拡大、新高値、高RS の個別株リーダーシップ証拠
+- `--history-file` によるテーマ履歴、1日/5日変化、20日z-score、持続期間の追跡
 - WebSearchベースのナラティブ確認
 
 **解決する問題:**
@@ -61,7 +64,7 @@ Theme Detectorは、FINVIZの業種・セクターパフォーマンスデータ
 
 | 項目 | 要否 | 説明 |
 |------|------|------|
-| Python 3.7+ | 必須 | スクリプト実行用 |
+| Python 3.9+ | 必須 | スクリプト実行用 |
 | `requests` | 必須 | HTTP通信 |
 | `beautifulsoup4` | 必須 | FINVIZ HTMLスクレイピング |
 | `lxml` | 必須 | HTML解析 |
@@ -100,6 +103,19 @@ python3 skills/theme-detector/scripts/theme_detector.py \
   --output-dir reports/
 ```
 
+### 個別株リーダーシップ + 履歴を使う日次実行
+
+```bash
+python3 skills/theme-detector/scripts/theme_detector.py \
+  --scan-hits data/theme_scan_hits_YYYY-MM-DD.json \
+  --narrative-scores data/theme_narrative_scores_YYYY-MM-DD.json \
+  --history-file reports/theme_detector_history.json \
+  --as-of-date YYYY-MM-DD \
+  --output-dir reports/
+```
+
+`--scan-hits` はJSON/JSONL/CSVを受け取り、`scan_type` がある行はそのまま使い、無い行は `return_5d`、`change_pct`、`volume`、`relative_volume`、`true_range` / `atr_20`、`close_location`、`new_high`、`rs_rating` / `relative_strength` などから 5D+20%、EP9M、レンジ拡大、新高値、高RS を判定します。リーダーシップ証拠が無い場合は0点としてTheme Heatを押し下げず、カバレッジ不足としてConfidence側に反映します。`--narrative-scores` はライブ検索ではなく、呼び出し側が用意したオフラインJSONを `theme_match_score` の補助証拠として読み込みます。
+
 ### Claudeへの自然言語
 
 ```
@@ -120,13 +136,17 @@ Step 1: 業種データ収集（FINVIZ）
   ↓
 Step 2: テーマ分類（業種→テーママッピング）
   ↓
-Step 3: Heat計算（4コンポーネント）
+Step 3: Theme Match Quality計算（業種 + 銘柄バスケット + ETF + 任意ナラティブ）
   ↓
-Step 4: ライフサイクル評価
+Step 4: Heat計算（カバレッジ付きコンポーネント）
   ↓
-Step 5: ナラティブ確認（WebSearch）
+Step 5: 個別株リーダーシップ証拠（任意）
   ↓
-Step 6: レポート生成
+Step 6: ライフサイクル / 履歴 / 加速度評価
+  ↓
+Step 7: ナラティブ確認（WebSearchまたはオフラインスコア）
+  ↓
+Step 8: What Changed Today / Leadership Evidence / レポート生成
 ```
 
 **Step 1: 業種データ収集**
@@ -138,9 +158,15 @@ Step 6: レポート生成
 - 例: Semiconductors, Software-Application, Software-Infrastructure → 「AI & Semiconductors」テーマ
 - 14以上のテーマ: AI/半導体、クリーンエネルギー、サイバーセキュリティ、Cloud/SaaS、バイオテク、インフラ、ゴールド/貴金属、防衛、ヘルスケア、不動産、暗号資産、中国/新興市場等
 
-**Step 3: Theme Heat計算**
+**Step 3: Theme Match Quality**
+- 業種一致だけでなく、明示的な銘柄バスケット、proxy ETF出来高、任意のオフライン・ナラティブスコアを組み合わせて `theme_match_score` を出します
+- AI / Cybersecurity / Cloud/SaaS のように業種が重なるテーマでも、実際に動いている銘柄バスケットやETFが違えば `themes.match_ranked` で区別できます
+- 既存互換性のため `themes.all` は従来どおりHeat順を維持し、match品質で見たい下流システム向けに `themes.match_ranked` を追加します
+- `leader_candidates` は異常出来高、5日リターン、レンジ拡大、終値位置、RS、流動性で証拠順位を付けます。時価総額はリスク分類にのみ使い、スコア主因にはしません
 
-Theme Heat (0-100) は4つのサブスコアから算出されます：
+**Step 4: Theme Heat計算**
+
+Theme Heat (0-100) は利用可能なサブスコアから算出されます。欠損データは50点として中立加点せず、カバレッジ不足としてConfidence側に反映します：
 
 | サブスコア | 内容 |
 |-----------|------|
@@ -149,7 +175,7 @@ Theme Heat (0-100) は4つのサブスコアから算出されます：
 | **Uptrend Signal** | Monty's Uptrend Ratio（上昇トレンド比率、MA10、傾き） |
 | **Breadth Signal** | テーマ内業種のうち、方向性に沿ったweighted returnを持つ業種の割合（LEADテーマなら正のリターン、LAGテーマなら負のリターン）。業種レベルの参加率 |
 
-**Step 4: ライフサイクル評価**
+**Step 5: ライフサイクル評価**
 
 | ステージ | 特徴 | 投資判断 |
 |---------|------|---------|
@@ -159,7 +185,7 @@ Theme Heat (0-100) は4つのサブスコアから算出されます：
 | **Mature** | 高Heat、ETF増殖、バリュエーション上昇 | 慎重にポジション管理 |
 | **Exhausting** | Heat低下、RSI極端、ETF飽和 | 利益確定を検討 |
 
-**Step 5: ナラティブ確認**
+**Step 6: ナラティブ確認**
 - 上位テーマについてWebSearchで最新ニュースを検索
 - 定量データとナラティブの一致度でConfidenceを調整
 
@@ -446,6 +472,10 @@ python3 skills/theme-detector/scripts/theme_detector.py [OPTIONS]
 | `--discover-themes` | 未マッチ業種から自動テーマ発見 | `false` |
 | `--dynamic-stocks` | FINVIZによる動的銘柄選択 | `false` |
 | `--dynamic-min-cap` | 動的銘柄の最小時価総額 (micro/small/mid) | `small` |
+| `--scan-hits` | 個別株リーダーシップのJSON/JSONL/CSV | なし |
+| `--history-file` | テーマ履歴JSON | `<output-dir>/theme_detector_history.json` |
+| `--no-history-update` | 履歴を読み込むが今回分を書き込まない | `false` |
+| `--as-of-date` | 決定論的な実行日 (YYYY-MM-DD) | 当日 |
 
 ### 定義済みテーマ一覧
 

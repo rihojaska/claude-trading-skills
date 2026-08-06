@@ -1,7 +1,7 @@
 # Claude Trading Skills プロジェクトビジョン
 
-Version: 0.1
-Last updated: 2026-05-03
+Version: 0.2
+Last updated: 2026-07-01
 
 English version: [PROJECT_VISION.md](PROJECT_VISION.md)
 
@@ -214,7 +214,9 @@ Advanced Satellite は、主導線よりも高いリスク、複雑な前提、�
 
 ## 12. ロードマップ
 
-### Phase 0: Vision and Metadata
+### Phase 0: Vision and Metadata — ✅ metadata / SSoT レイヤーは完了 (2026-05-17)
+
+> **状況:** `skills-index.yaml` を SSoT として導入 (PR #84)。現在 index に登録されている全スキルに id / display_name / category / status / summary / integrations[] / timeframe / difficulty / inputs / outputs を付与し、`--strict-metadata` を CI と pre-push hook で enforce 済み。機能的な metadata/SSoT 作業は完了。今後は通常の docs maintenance。
 
 まず、既存スキル群を整理し、プロジェクト全体を説明しやすくします。
 
@@ -234,7 +236,9 @@ Advanced Satellite は、主導線よりも高いリスク、複雑な前提、�
 - API requirements matrix が最新化されている
 - docs のスキル数、カテゴリ、説明が現状と矛盾していない
 
-### Phase 1: Trading Skills Navigator v0
+### Phase 1: Trading Skills Navigator v0 — ✅ v0 実装済み (2026-05-17)
+
+> **状況:** `skills/trading-skills-navigator/` に決定論的 recommender (`recommend.py`) を実装。リポジトリルートの SSoT を読み、Claude Web App では同梱 `metadata_snapshot.json` に fallback、manifest 駆動の setup も提供。10 問の推薦 regression スイートは既に存在 (`scripts/tests/test_recommend.py::CONTRACT`)。今後は UX 調整、実ユーザー smoke test、利用例の整備。
 
 このリポジトリの案内係となるメタスキルを作ります。
 
@@ -261,7 +265,9 @@ Phase 1 の責任範囲は、AI による対話的推薦です。ユーザーの
 - APIキーあり / なしの導線を分けて案内できる
 - Claude Web App と Claude Code の導入手順を説明できる
 
-### Phase 2: Skillsets
+### Phase 2: Skillsets — ✅ 一部完了: コア 4 skillset 実装済み (2026-05-17)
+
+> **状況:** `skillsets/` に `market-regime` / `core-portfolio` / `swing-opportunity` / `trade-memory` の manifest（および `skillsets/README.md`）を実装。`validate-skillsets` + `skillset-docs-drift` ゲートで保護し、Navigator が参照。残りの skillset 候補（`dividend-income` / `strategy-research` / `advanced-satellite`）は後続。
 
 目的別にスキルを束ねる manifest を作ります。
 
@@ -284,7 +290,9 @@ Phase 1 の責任範囲は、AI による対話的推薦です。ユーザーの
 - 対象ユーザー、時間軸、必要API、使わない方がよい条件が書かれている
 - Navigator が skillset manifest を参照して推薦できる
 
-### Phase 3: Workflows
+### Phase 3: Workflows — ✅ 一部完了 (2026-05-09)
+
+> **状況:** PR #85 で 5 本の Core + Satellite manifest（`core-portfolio-weekly` / `market-regime-daily` / `swing-opportunity-daily` / `trade-memory-loop` / `monthly-performance-review`）を `workflows/` に追加し、`--strict-workflows` で検証。Advanced 系 (`risk-off-short-daily` / `earnings-weekly` / `strategy-research-pipeline`) は後続。
 
 Skillset だけでは実運用には足りません。実際のトレードでは、順番、判断ゲート、成果物の受け渡しが必要です。
 
@@ -322,7 +330,9 @@ Advanced workflow 候補:
 - 各 trade workflow が journal entry または postmortem への接続を持つ
 - 1 つ以上の workflow がサンプルデータで end-to-end に説明できる
 
-### Phase 4: ユーザーにやさしい入口
+### Phase 4: ユーザーにやさしい入口 — ✅ 一部完了 (2026-05-17)
+
+> **状況:** README（EN/JA）に 5 ワークフロー起点の「おすすめの始め方」＋「API キー不要の入口」を整備。ワークフロー / skillset の doc ページは自動生成済み。Navigator が自然言語の on-ramp。専用の "Find Your Workflow" ドキュメントと quickstart の拡充は後続。
 
 GitHub や `.skill` ファイルに慣れていないユーザー向けに、入口を簡単にします。
 
@@ -347,7 +357,9 @@ Phase 4 の責任範囲は、静的な入口と配布導線です。ドキュメ
 - Claude Web App にどの `.skill` をアップロードすべきか分かる
 - 最初に Claude に貼る starter prompt が用意されている
 
-### Phase 5: Learning Loop
+### Phase 5: Learning Loop — ✅ 一部完了 (2026-05-17)
+
+> **状況:** `trader-memory-core` + `signal-postmortem` と `trade-memory-loop` / `monthly-performance-review` ワークフローで Plan → Trade → Record → Review → Improve のループを閉じている。公開可能な end-to-end の実行サンプルは未整備。
 
 トレード結果を記録し、改善につなげる仕組みを強化します。
 
@@ -424,16 +436,65 @@ Plan -> Trade -> Record -> Review -> Improve -> Adjust Workflow
 
 短期的には、以下の順番で進めます。
 
-- **Now**: プロジェクトビジョン文書（`PROJECT_VISION.md` / `PROJECT_VISION.ja.md`）を完成させる
-- **Now**: `skills-index.yaml` または `skills-inventory.yaml` を作り、スキル inventory と API 要件を整理する
-- **Next**: Trading Skills Navigator を作る
-- **Next**: 主要 skillsets を YAML で定義する
-- **Next**: 主要 workflows を YAML で定義する
-- **Next**: "Find Your Workflow" ドキュメントを作る
+- ✅ **完了 (2026-05-09)**: プロジェクトビジョン文書（`PROJECT_VISION.md` / `PROJECT_VISION.ja.md`）
+- ✅ **完了 (2026-05-09)**: `skills-index.yaml` SSoT + validator (PR #84)
+- ✅ **完了 (2026-05-09)**: 5 本の Core ワークフロー manifest を `workflows/` に追加 (PR #85)
+- ✅ **完了 (2026-05-09)**: ワークフロー doc ページの自動生成 (PR #86)
+- ✅ **完了**: 現在 index に登録されている全スキルに `timeframe` / `difficulty` / `inputs` / `outputs` を付与し、`--strict-metadata` を CI + pre-push hook で enforce
+- ✅ **完了**: Trading Skills Navigator v0（決定論的 recommender + Web App snapshot fallback + manifest 駆動 setup）
+- **一部完了**: 主要 skillsets の YAML 定義 — コア 4 skillset 実装済み（`market-regime` / `core-portfolio` / `swing-opportunity` / `trade-memory`）。残りの skillset 候補（`dividend-income` / `strategy-research` / `advanced-satellite`）は後続
+- **Next**: Advanced ワークフロー manifest（`risk-off-short-daily` / `earnings-weekly` / `strategy-research-pipeline`）を追加 — [#216](https://github.com/tradermonty/claude-trading-skills/issues/216) で追跡
+- ✅ **完了 (2026-05-24)**: "Find Your Workflow" ドキュメント（[EN](docs/en/find-your-workflow.md) / [JA](docs/ja/find-your-workflow.md)、PR #142）
+- ✅ **完了 (2026-05-24)**: 公開可能な end-to-end 実行サンプル — `examples/workflows/` に `market-regime-daily` と `trade-memory-loop` の sample-run / sample-run-full-path を収録（PR #141）
+- ✅ **完了 (2026-05-24)**: 併走プロジェクト [Hermes Trading Research Agent Work Package](https://github.com/tradermonty/hermes-trading-research-agent-work-package) を README からリンク（PR #140）
 - **Later**: 必要に応じて bundle builder や recommender CLI を作る
 - **Later**: Web アプリ POC を検討する
 
 最初から Web アプリや bundle ZIP に進むより、まずは構造化された知識と案内役を作る方が安全です。
+
+### 2026-07-01 リポジトリ監査による優先事項
+
+2026-07-01 にリポジトリ全体をミッションと照らして監査し、以下の優先順位付きバックログを作成しました。各項目は `roadmap-2026-07` ラベル付きの GitHub Issue として追跡します。
+
+監査から得た指針はこうです。分析・スクリーニングのレイヤーはすでに十分強い。ミッションに照らして最も足りないのは「大負けしないための仕組み」を担う Priority A と、「growing together」を支えるコミュニティ基盤の Priority B です。
+
+**Priority A — ミッション直結の機能ギャップ（最優先で作る）:**
+
+- [#194](https://github.com/tradermonty/claude-trading-skills/issues/194) 口座レベルのドローダウン・サーキットブレーカー（日次最大損失 / 連敗クールダウン / 週次ドローダウン停止）
+- [#195](https://github.com/tradermonty/claude-trading-skills/issues/195) プレトレード規律ゲート（手動執行前のチェックリスト）
+- [#196](https://github.com/tradermonty/claude-trading-skills/issues/196) 学習ループ系スキルのベータ卒業（`trade-performance-coach` / `stockbee-setup-fluency-trainer`）
+- [#197](https://github.com/tradermonty/claude-trading-skills/issues/197) 練習機能の一般化（VCP / CANSLIM / ブレイクアウトのドリル + ペーパートレード練習パス）
+
+**Priority B — 「growing together」のコミュニティ基盤:**
+
+- [#198](https://github.com/tradermonty/claude-trading-skills/issues/198) コミュニティ健全性ファイル（CONTRIBUTING / CODE_OF_CONDUCT / SECURITY）
+- [#199](https://github.com/tradermonty/claude-trading-skills/issues/199) 歓迎する貢献の型に沿った Issue / PR テンプレート
+- [#201](https://github.com/tradermonty/claude-trading-skills/issues/201) グラウンドルール付き GitHub Discussions の開設
+- [#203](https://github.com/tradermonty/claude-trading-skills/issues/203) README のスリム化（メンテナー向けセクションの移設）
+
+**Priority C — 初心者オンボーディング:**
+
+- [#200](https://github.com/tradermonty/claude-trading-skills/issues/200) 用語集（EN / JA）
+- [#202](https://github.com/tradermonty/claude-trading-skills/issues/202) FAQ ページ
+- [#204](https://github.com/tradermonty/claude-trading-skills/issues/204) 「最初の1週間」ガイド
+- [#206](https://github.com/tradermonty/claude-trading-skills/issues/206) 実際の最低コストの明示
+- [#208](https://github.com/tradermonty/claude-trading-skills/issues/208) 残りのコアワークフローの実行サンプル
+- [#209](https://github.com/tradermonty/claude-trading-skills/issues/209) 出力スクリーンショット等の視覚材料
+
+**Priority D — 足元の整理と品質負債:**
+
+- [#212](https://github.com/tradermonty/claude-trading-skills/issues/212) 古い / 未生成の `.skill` パッケージの再生成
+- [#205](https://github.com/tradermonty/claude-trading-skills/issues/205) `trading-skills-navigator` の古いスキル数表記の修正
+- [#207](https://github.com/tradermonty/claude-trading-skills/issues/207) 停止中のスキル改善ループの再稼働
+- [#214](https://github.com/tradermonty/claude-trading-skills/issues/214) 低スコア4スキルの改善
+
+**Priority E — 中期のカバレッジ:**
+
+- [#210](https://github.com/tradermonty/claude-trading-skills/issues/210) CI テストマトリクスの自動生成
+- [#211](https://github.com/tradermonty/claude-trading-skills/issues/211) テスト未整備スキルへのテスト追加
+- [#213](https://github.com/tradermonty/claude-trading-skills/issues/213) 小口座サポート（PDT ルール / 端株サイジング / 取引摩擦コスト）
+- [#215](https://github.com/tradermonty/claude-trading-skills/issues/215) 日本の税制スキル（NISA / 特定口座 / 外国税額控除）
+- [#216](https://github.com/tradermonty/claude-trading-skills/issues/216) 未着手の skillset と Advanced ワークフロー manifest
 
 ## 16. コミュニティと運営方針
 

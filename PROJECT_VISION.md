@@ -1,7 +1,7 @@
 # Claude Trading Skills Project Vision
 
-Version: 0.1
-Last updated: 2026-05-03
+Version: 0.2
+Last updated: 2026-07-01
 
 Japanese version: [PROJECT_VISION.ja.md](PROJECT_VISION.ja.md)
 
@@ -216,7 +216,9 @@ This structure reduces drift between skill source files, documentation, recommen
 
 ## 12. Roadmap
 
-### Phase 0: Vision and Metadata
+### Phase 0: Vision and Metadata — ✅ complete for the metadata / SSoT layer (2026-05-17)
+
+> **Status:** `skills-index.yaml` is the SSoT (PR #84). All currently indexed skills carry id / display_name / category / status / summary / integrations[] / timeframe / difficulty / inputs / outputs, and `--strict-metadata` is enforced in CI and the pre-push hook. No functional metadata/SSoT work remains; future work is routine docs maintenance.
 
 First, organize the existing skill set and make the overall project easier to explain.
 
@@ -236,7 +238,9 @@ Definition of done:
 - The API requirements matrix is current
 - Docs are consistent with the actual number of skills, categories, and descriptions
 
-### Phase 1: Trading Skills Navigator v0
+### Phase 1: Trading Skills Navigator v0 — ✅ v0 implemented (2026-05-17)
+
+> **Status:** `skills/trading-skills-navigator/` ships a deterministic recommender (`recommend.py`) that reads the repo-root SSoT and falls back to a bundled `metadata_snapshot.json` for the Claude Web App, plus manifest-driven setup. A 10-question recommendation regression suite already exists (`scripts/tests/test_recommend.py::CONTRACT`). Ongoing: UX polish, real-user smoke tests, and prompt examples.
 
 Create a meta-skill that acts as the guide for this repository.
 
@@ -263,7 +267,9 @@ Definition of done:
 - It can separate API-key and no-API paths
 - It can explain setup paths for Claude Web App and Claude Code
 
-### Phase 2: Skillsets
+### Phase 2: Skillsets — ✅ partial: 4 core skillsets implemented (2026-05-17)
+
+> **Status:** `skillsets/` ships `market-regime`, `core-portfolio`, `swing-opportunity`, and `trade-memory` manifests (with `skillsets/README.md`), guarded by `validate-skillsets` + the `skillset-docs-drift` gate, and consumed by the Navigator. The remaining skillset candidates (`dividend-income`, `strategy-research`, `advanced-satellite`) are deferred.
 
 Create purpose-specific manifests that bundle skills.
 
@@ -286,7 +292,9 @@ Definition of done:
 - Each skillset documents target users, timeframe, required APIs, and when not to use it
 - The Navigator can use skillset manifests for recommendations
 
-### Phase 3: Workflows
+### Phase 3: Workflows — ✅ partially complete (2026-05-09)
+
+> **Status:** PR #85 ships the 5 Core + Satellite manifests (`core-portfolio-weekly`, `market-regime-daily`, `swing-opportunity-daily`, `trade-memory-loop`, `monthly-performance-review`) under `workflows/`, validated by `--strict-workflows`. Advanced workflows (`risk-off-short-daily`, `earnings-weekly`, `strategy-research-pipeline`) remain follow-up.
 
 Skillsets are not enough for real operations. Trading requires sequence, decision gates, and artifact handoffs.
 
@@ -324,7 +332,9 @@ Definition of done:
 - Each trade workflow connects to a journal entry or postmortem
 - At least 1 workflow can be explained end-to-end with sample data
 
-### Phase 4: User-Friendly Entry Points
+### Phase 4: User-Friendly Entry Points — ✅ partially complete (2026-05-24)
+
+> **Status:** README (EN/JA) has a Recommended Starting Path + No-API starter path keyed to the 5 workflows; generated workflow & skillset doc pages exist; the Navigator is the natural-language on-ramp; the dedicated [Find Your Workflow](docs/en/find-your-workflow.md) ([日本語](docs/ja/find-your-workflow.md)) on-ramp is now published (PR #142); and the [Hermes Trading Research Agent Work Package](https://github.com/tradermonty/hermes-trading-research-agent-work-package) companion is linked from the README (PR #140) as a ready-to-run agent-style usage path. Broader quickstart polish (starter prompts, API setup wizard, web UI) remains follow-up.
 
 Make the project easier for users who are not comfortable with GitHub or `.skill` files.
 
@@ -333,7 +343,7 @@ Phase 4 focuses on static entry points and distribution paths. It should provide
 Candidates:
 
 - Core + Satellite quickstart
-- "Find Your Workflow" document
+- ✅ ["Find Your Workflow" document](docs/en/find-your-workflow.md) (PR #142, merged 2026-05-24)
 - 15-minute daily routine
 - 60-minute weekly review
 - Starter prompts
@@ -341,6 +351,7 @@ Candidates:
 - API setup guide
 - `scripts/recommend_skills.py`
 - Static recommender page
+- ✅ [Hermes Trading Research Agent Work Package](https://github.com/tradermonty/hermes-trading-research-agent-work-package) companion link in README (PR #140, merged 2026-05-24)
 
 Definition of done:
 
@@ -349,7 +360,9 @@ Definition of done:
 - A user can tell which `.skill` files to upload to Claude Web App
 - Starter prompts are available for first use
 
-### Phase 5: Learning Loop
+### Phase 5: Learning Loop — ✅ partially complete (2026-05-24)
+
+> **Status:** `trader-memory-core` + `signal-postmortem` + the `trade-memory-loop` and `monthly-performance-review` workflows close the Plan → Trade → Record → Review → Improve loop. Public end-to-end sample operating examples now ship under [`examples/workflows/`](examples/workflows/): the two workflows currently covered (`market-regime-daily` and `trade-memory-loop`) each have both a `sample-run/` (required-only) and a `sample-run-full-path/` (with the optional step exercised, PR #141, merged 2026-05-24). The full-path samples are deterministically reproducible via the real `calculate_exposure.py` / `thesis_store._validate_thesis()` paths. Adding equivalent samples for the remaining workflows (`core-portfolio-weekly`, `swing-opportunity-daily`, `monthly-performance-review`) is follow-up work.
 
 Strengthen the mechanisms for recording trade outcomes and feeding them back into improvement.
 
@@ -426,16 +439,65 @@ Future development should follow these principles:
 
 Near-term work should proceed in this order:
 
-- **Now**: Finish the project vision documents (`PROJECT_VISION.md` / `PROJECT_VISION.ja.md`)
-- **Now**: Create `skills-index.yaml` or `skills-inventory.yaml` and organize skill inventory / API requirements
-- **Next**: Create Trading Skills Navigator
-- **Next**: Define major skillsets in YAML
-- **Next**: Define major workflows in YAML
-- **Next**: Create "Find Your Workflow" documentation
+- ✅ **Done (2026-05-09)**: Project vision documents (`PROJECT_VISION.md` / `PROJECT_VISION.ja.md`)
+- ✅ **Done (2026-05-09)**: `skills-index.yaml` SSoT + validator (PR #84)
+- ✅ **Done (2026-05-09)**: 5 core workflow manifests under `workflows/` (PR #85)
+- ✅ **Done (2026-05-09)**: Auto-generated workflow doc pages (PR #86)
+- ✅ **Done**: All indexed skills carry `timeframe` / `difficulty` / `inputs` / `outputs`; `--strict-metadata` enforced in CI + the pre-push hook
+- ✅ **Done**: Trading Skills Navigator v0 (deterministic recommender + Web App snapshot fallback + manifest-driven setup)
+- **Partial**: Major skillsets in YAML — 4 core skillsets shipped (`market-regime`, `core-portfolio`, `swing-opportunity`, `trade-memory`); remaining skillset candidates (`dividend-income`, `strategy-research`, `advanced-satellite`) deferred
+- **Next**: Add advanced workflow manifests (`risk-off-short-daily`, `earnings-weekly`, `strategy-research-pipeline`) — tracked in [#216](https://github.com/tradermonty/claude-trading-skills/issues/216)
+- ✅ **Done (2026-05-24)**: Create "Find Your Workflow" documentation ([EN](docs/en/find-your-workflow.md) / [JA](docs/ja/find-your-workflow.md), PR #142)
+- ✅ **Done (2026-05-24)**: Public end-to-end sample operating examples — both `sample-run/` (required-only) and `sample-run-full-path/` (with optional step) under [`examples/workflows/`](examples/workflows/) for `market-regime-daily` and `trade-memory-loop` (PR #141; required-only path shipped earlier in PR #118)
+- ✅ **Done (2026-05-24)**: Companion work package — [Hermes Trading Research Agent](https://github.com/tradermonty/hermes-trading-research-agent-work-package) link added to README (PR #140)
 - **Later**: Add bundle builder or recommender CLI if needed
 - **Later**: Explore a web app proof of concept
 
 It is safer to build structured knowledge and a guide first, rather than jumping directly to web apps or bundle ZIPs.
+
+### 2026-07-01 Repository Audit Priorities
+
+A full repository audit on 2026-07-01 mapped the current state against the mission and produced the prioritized backlog below. Each item is tracked as a GitHub issue labeled `roadmap-2026-07`.
+
+The guiding observation: the analysis and screening layers are already strong, while the mission-critical gaps are the "stop taking big losses" capability set (Priority A) and the "growing together" community foundation (Priority B).
+
+**Priority A — mission-critical capability gaps (build first):**
+
+- [#194](https://github.com/tradermonty/claude-trading-skills/issues/194) Account-level drawdown circuit breaker (daily loss limit / losing-streak cooldown / weekly drawdown halt)
+- [#195](https://github.com/tradermonty/claude-trading-skills/issues/195) Pre-trade discipline gate (checklist before manual execution)
+- [#196](https://github.com/tradermonty/claude-trading-skills/issues/196) Promote learning-loop skills out of beta (`trade-performance-coach`, `stockbee-setup-fluency-trainer`)
+- [#197](https://github.com/tradermonty/claude-trading-skills/issues/197) Generalize deliberate practice (VCP / CANSLIM / breakout drills + paper-trading path)
+
+**Priority B — "growing together" community foundation:**
+
+- [#198](https://github.com/tradermonty/claude-trading-skills/issues/198) Community health files (CONTRIBUTING / CODE_OF_CONDUCT / SECURITY)
+- [#199](https://github.com/tradermonty/claude-trading-skills/issues/199) Issue and PR templates aligned with welcomed contribution types
+- [#201](https://github.com/tradermonty/claude-trading-skills/issues/201) GitHub Discussions with ground rules
+- [#203](https://github.com/tradermonty/claude-trading-skills/issues/203) Slim the README for beginners (relocate contributor-only sections)
+
+**Priority C — beginner onboarding:**
+
+- [#200](https://github.com/tradermonty/claude-trading-skills/issues/200) Bilingual glossary
+- [#202](https://github.com/tradermonty/claude-trading-skills/issues/202) FAQ page
+- [#204](https://github.com/tradermonty/claude-trading-skills/issues/204) "Your First Week" onboarding guide
+- [#206](https://github.com/tradermonty/claude-trading-skills/issues/206) Honest minimum-cost statement
+- [#208](https://github.com/tradermonty/claude-trading-skills/issues/208) Sample runs for the remaining core workflows
+- [#209](https://github.com/tradermonty/claude-trading-skills/issues/209) Output screenshots and visuals
+
+**Priority D — housekeeping and quality debt:**
+
+- [#212](https://github.com/tradermonty/claude-trading-skills/issues/212) Regenerate stale / missing `.skill` packages
+- [#205](https://github.com/tradermonty/claude-trading-skills/issues/205) Fix stale counts in `trading-skills-navigator`
+- [#207](https://github.com/tradermonty/claude-trading-skills/issues/207) Restart the stalled skill improvement loop
+- [#214](https://github.com/tradermonty/claude-trading-skills/issues/214) Improve the 4 lowest-scoring skills
+
+**Priority E — mid-term coverage:**
+
+- [#210](https://github.com/tradermonty/claude-trading-skills/issues/210) Auto-generate the CI test matrix
+- [#211](https://github.com/tradermonty/claude-trading-skills/issues/211) Test suites for skills that have none
+- [#213](https://github.com/tradermonty/claude-trading-skills/issues/213) Small-account support (PDT rule / fractional shares / friction costs)
+- [#215](https://github.com/tradermonty/claude-trading-skills/issues/215) Japan tax skill (NISA / tokutei-kouza / foreign tax credit)
+- [#216](https://github.com/tradermonty/claude-trading-skills/issues/216) Deferred skillsets and advanced workflow manifests
 
 ## 16. Community and Governance
 

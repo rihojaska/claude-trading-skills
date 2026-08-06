@@ -898,3 +898,290 @@ def test_apply_improvement_precommit_unfixable_failure(
     # Verify no commit was made
     commit_calls = [c for c in call_log if c[:2] == ["git", "commit"]]
     assert len(commit_calls) == 0
+
+
+# ── Code-faithfulness gate tests ──
+
+
+def _setup_faithfulness_project(
+    tmp_path: Path,
+    skill_name: str,
+    prereq_body: str,
+    script_src: str = "",
+    requires_python: str = ">=3.9",
+    heading: str = "Prerequisites",
+) -> Path:
+    """Build a temp project: pyproject + one skill with a Prerequisites section."""
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "x"\nrequires-python = "{requires_python}"\n',
+        encoding="utf-8",
+    )
+    skill_dir = tmp_path / "skills" / skill_name
+    (skill_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    skill_md = (
+        f"---\nname: {skill_name}\ndescription: test\n---\n\n"
+        f"# {skill_name}\n\n"
+        f"## {heading}\n\n{prereq_body}\n\n"
+        f"## Workflow\n\nDo the thing.\n"
+    )
+    (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
+    if script_src:
+        (skill_dir / "scripts" / "run.py").write_text(script_src, encoding="utf-8")
+    return tmp_path
+
+
+def test_faithfulness_flags_unimported_library(loop_module, tmp_path: Path):
+    """PR #164 case: `pandas` listed but no script imports it."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with `pandas` and `requests` libraries",
+        script_src="import requests\nimport csv\n",
+    )
+    violations = loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend")
+    assert any("pandas" in v for v in violations)
+    assert not any("requests" in v for v in violations)  # requests IS imported
+
+
+def test_faithfulness_passes_when_library_imported(loop_module, tmp_path: Path):
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with the `requests` library (stdlib `csv`/`io` used)",
+        script_src="import requests\nimport csv\nimport io\n",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend") == []
+
+
+def test_faithfulness_flags_python_floor_below_repo(loop_module, tmp_path: Path):
+    """PR #164 case: `Python 3.8+` while repo requires >=3.9."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.8+** with `requests`",
+        script_src="import requests\n",
+        requires_python=">=3.9",
+    )
+    violations = loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend")
+    assert any("3.8" in v and "3.9" in v for v in violations)
+
+
+def test_faithfulness_passes_python_floor_at_repo(loop_module, tmp_path: Path):
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with `requests`",
+        script_src="import requests\n",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend") == []
+
+
+def test_faithfulness_passes_python_floor_above_repo(loop_module, tmp_path: Path):
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.10+** with `requests`",
+        script_src="import requests\n",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend") == []
+
+
+def test_faithfulness_skips_negated_library_mention(loop_module, tmp_path: Path):
+    """A negated line such as "No `pandas` required" must not be flagged."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with `requests`\n- No `pandas` dependency required",
+        script_src="import requests\n",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend") == []
+
+
+def test_faithfulness_handles_version_pin(loop_module, tmp_path: Path):
+    """`pandas>=2.0` strips the pin and still flags the unimported lib."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- `pandas>=2.0`",
+        script_src="import requests\n",
+    )
+    violations = loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend")
+    assert any("pandas" in v for v in violations)
+
+
+def test_faithfulness_pyyaml_maps_to_yaml_import(loop_module, tmp_path: Path):
+    """`PyYAML` is faithful when a script imports `yaml`."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "edge",
+        "- **Python 3.9+** with `PyYAML` installed",
+        script_src="import yaml\n",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "edge") == []
+
+
+def test_faithfulness_recognizes_input_requirements_alias(loop_module, tmp_path: Path):
+    """The reviewer accepts `## Input Requirements` as the Prerequisites section."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with `pandas`",
+        script_src="import requests\n",
+        heading="Input Requirements",
+    )
+    violations = loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend")
+    assert any("pandas" in v for v in violations)
+
+
+def test_faithfulness_no_section_returns_empty(loop_module, tmp_path: Path):
+    skill_dir = tmp_path / "skills" / "noprereq"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: noprereq\ndescription: t\n---\n# noprereq\n## Workflow\nx\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text('requires-python = ">=3.9"\n', encoding="utf-8")
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "noprereq") == []
+
+
+def test_faithfulness_missing_skill_returns_empty(loop_module, tmp_path: Path):
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "ghost") == []
+
+
+def test_faithfulness_section_stops_at_next_h2(loop_module, tmp_path: Path):
+    """A library named in a LATER section must not be attributed to Prerequisites."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with `requests`",
+        script_src="import requests\n",
+    )
+    skill_md = tmp_path / "skills" / "uptrend" / "SKILL.md"
+    skill_md.write_text(
+        skill_md.read_text(encoding="utf-8") + "\n## Notes\n\nWe avoid `pandas` here.\n",
+        encoding="utf-8",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend") == []
+
+
+def test_faithfulness_import_from_form_counts(loop_module, tmp_path: Path):
+    """`from pandas import ...` also counts as importing pandas."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "uptrend",
+        "- **Python 3.9+** with `pandas`",
+        script_src="from pandas import DataFrame\n",
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "uptrend") == []
+
+
+def test_faithfulness_lib_referenced_as_string_literal_is_faithful(loop_module, tmp_path: Path):
+    """A lib used by name (lxml as a BeautifulSoup parser) is not flagged as unused."""
+    _setup_faithfulness_project(
+        tmp_path,
+        "canslim",
+        "- **Python 3.9+** with `beautifulsoup4` and `lxml`",
+        script_src='from bs4 import BeautifulSoup\n\nsoup = BeautifulSoup("<p/>", "lxml")\n',
+    )
+    assert loop_module.check_prerequisites_faithfulness(tmp_path, "canslim") == []
+
+
+def test_repo_python_floor_parses_pyproject(loop_module, tmp_path: Path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nrequires-python = ">=3.11"\n', encoding="utf-8"
+    )
+    assert loop_module._repo_python_floor(tmp_path) == (3, 11)
+
+
+def test_repo_python_floor_missing_returns_none(loop_module, tmp_path: Path):
+    assert loop_module._repo_python_floor(tmp_path) is None
+
+
+def test_apply_improvement_blocks_newly_introduced_unfaithful_prereqs(
+    loop_module, tmp_path: Path, monkeypatch
+):
+    """The gate rolls back an improvement that ADDS an unfaithful Prerequisites
+    section (PR #164 scenario), even when the structural score improved."""
+    # Pre-state: faithful Prerequisites (requests is imported, 3.9 floor).
+    _setup_faithfulness_project(
+        tmp_path,
+        "test-skill",
+        "- **Python 3.9+** with `requests`",
+        script_src="import requests\n",
+    )
+    bad_md = (
+        "---\nname: test-skill\ndescription: t\n---\n\n# test-skill\n\n"
+        "## Prerequisites\n\n- **Python 3.8+** with `pandas` and `requests` libraries\n\n"
+        "## Workflow\n\nx\n"
+    )
+
+    def fake_run(cmd, **kwargs):
+        from subprocess import CompletedProcess
+
+        if cmd and cmd[0] == "claude":  # simulate the LLM writing a bad section
+            (tmp_path / "skills" / "test-skill" / "SKILL.md").write_text(bad_md, encoding="utf-8")
+        return CompletedProcess(cmd, 0, "", "")
+
+    rollback_called = []
+    monkeypatch.setattr(loop_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(loop_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(loop_module, "check_existing_pr", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        loop_module,
+        "run_auto_score",
+        lambda *a, **kw: {
+            "auto_review": {"score": 98},
+            "final_review": {"score": 98, "findings": [], "improvement_items": []},
+        },
+    )
+    monkeypatch.setattr(loop_module, "_rollback", lambda *a, **kw: rollback_called.append(True))
+
+    report = {
+        "auto_review": {"score": 81},
+        "final_review": {"score": 81, "improvement_items": ["Add Prerequisites"], "findings": []},
+    }
+    result = loop_module.apply_improvement(tmp_path, "test-skill", report, dry_run=False)
+
+    assert result is None, "Improvement introducing unfaithful Prereqs must be rolled back"
+    assert rollback_called, "Gate must roll back on a new faithfulness violation"
+
+
+def test_apply_improvement_allows_preexisting_unfaithful_prereqs(
+    loop_module, tmp_path: Path, monkeypatch
+):
+    """A pre-existing unfaithful Prerequisites section must NOT block an unrelated
+    improvement — the gate only fires on NEWLY introduced violations."""
+    # Pre-state already has the debt (pandas listed, 3.8 floor); claude leaves it
+    # untouched while addressing an unrelated finding.
+    _setup_faithfulness_project(
+        tmp_path,
+        "test-skill",
+        "- **Python 3.8+** with `pandas`",
+        script_src="import requests\n",
+    )
+
+    def fake_run(cmd, **kwargs):
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(loop_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(loop_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(loop_module, "check_existing_pr", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        loop_module,
+        "run_auto_score",
+        lambda *a, **kw: {
+            "auto_review": {"score": 85},
+            "final_review": {"score": 85, "findings": [], "improvement_items": []},
+        },
+    )
+
+    report = {
+        "auto_review": {"score": 70},
+        "final_review": {"score": 70, "improvement_items": ["fix something else"], "findings": []},
+    }
+    result = loop_module.apply_improvement(tmp_path, "test-skill", report, dry_run=False)
+
+    assert isinstance(result, dict), "Pre-existing debt must not block an unrelated improvement"
+    assert result["auto_review"]["score"] == 85

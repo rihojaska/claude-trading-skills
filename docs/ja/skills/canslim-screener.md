@@ -410,7 +410,7 @@ python3 skills/canslim-screener/scripts/screen_canslim.py [OPTIONS]
 | `--api-key` | FMP APIキー | `$FMP_API_KEY` 環境変数 |
 | `--max-candidates` | 分析する最大銘柄数 | 40 |
 | `--top` | レポートに含める上位件数 | 20 |
-| `--output-dir` | レポート出力ディレクトリ | カレントディレクトリ |
+| `--output-dir` | レポート出力ディレクトリ | `reports/` |
 | `--universe` | カスタム銘柄リスト（スペース区切り） | S&P 500トップ40 |
 | `--rs-benchmark` | L コンポーネント用 RS ベンチマーク（SPY, QQQ, IWM 等）。M コンポーネントは EMA スケール一貫性のため `^GSPC` を継続使用。 | `^GSPC` |
 | `--disable-rs` | L コンポーネント計算をスキップ（銘柄ごとの 365 日 fetch とカスタムベンチマーク fetch を節約）。L は中立 50 で固定。 | `false` |

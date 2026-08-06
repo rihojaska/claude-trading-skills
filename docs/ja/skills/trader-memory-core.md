@@ -85,17 +85,17 @@ Trader Memory Coreは「何を考え、何が起き、何を学んだか」を�
 
 ```bash
 # ステップ 1: スクリーナー出力を thesis として登録
-python3 skills/trader-memory-core/scripts/thesis_ingest.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py ingest \
   --source kanchi-dividend-sop \
   --input reports/kanchi_entry_signals_2026-03-14.json \
   --state-dir state/theses/
 
 # ステップ 2: thesis を検索
-python3 skills/trader-memory-core/scripts/thesis_store.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py store \
   --state-dir state/theses/ list --status IDEA
 
 # ステップ 3: サマリー統計を表示
-python3 skills/trader-memory-core/scripts/thesis_review.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py review \
   --state-dir state/theses/ summary
 ```
 
@@ -109,13 +109,13 @@ python3 skills/trader-memory-core/scripts/thesis_review.py \
 
 ```bash
 # kanchi-dividend-sop から
-python3 skills/trader-memory-core/scripts/thesis_ingest.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py ingest \
   --source kanchi-dividend-sop \
   --input reports/kanchi_entry_signals_2026-03-14.json \
   --state-dir state/theses/
 
 # earnings-trade-analyzer から
-python3 skills/trader-memory-core/scripts/thesis_ingest.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py ingest \
   --source earnings-trade-analyzer \
   --input reports/earnings_trade_scored_2026-03-14.json \
   --state-dir state/theses/
@@ -184,7 +184,7 @@ attach_position(state_dir, thesis_id,
 注意が必要な thesis を確認します:
 
 ```bash
-python3 skills/trader-memory-core/scripts/thesis_review.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py review \
   --state-dir state/theses/ review-due --as-of 2026-04-15
 ```
 
@@ -216,7 +216,7 @@ close(state_dir, thesis_id,
 ポストモーテムを生成:
 
 ```bash
-python3 skills/trader-memory-core/scripts/thesis_review.py \
+python3 skills/trader-memory-core/scripts/trader_memory_cli.py review \
   --state-dir state/theses/ postmortem th_aapl_div_20260314_a3f1
 ```
 
@@ -311,3 +311,6 @@ P&L、保有日数、（FMP APIキーがあれば）MAE/MFEを含むレポート
 
 **スキーマ:**
 - `skills/trader-memory-core/schemas/thesis.schema.json` -- thesis バリデーション用 JSON Schema
+
+**実例:**
+- `examples/workflows/trade-memory-loop/sample-run-full-path/` -- Plan -> Trade -> Record -> Postmortem -> Backtest -> Journal のエンドツーエンド実行例

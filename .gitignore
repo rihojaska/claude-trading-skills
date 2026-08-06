@@ -18,6 +18,7 @@ env/
 # Tool configurations
 .idea/
 .vscode/
+.claude/
 .envrc
 .mcp.json
 
@@ -33,9 +34,20 @@ logs/
 reports/
 reviews/
 
+# Stray screener reports if a script is run with --output-dir . (default is reports/)
+canslim_screener_*.json
+canslim_screener_*.md
+
 # Per-symbol runtime state (e.g. parabolic-short SSR carryover files).
 # Kept out of commits so production state never leaks into the repo.
 state/
+
+# Local work-in-progress staging (patch bundles, nested skill drafts, ad-hoc
+# fetch scripts). Never place these under skills/ — an untracked path there
+# blocks the automated skill loops, whose git safety check aborts on any
+# untracked file. See docs/dev/maintenance-runbook.md.
+.staging/
+scripts/weekly_portfolio_review_fetch.py
 
 # CI artifacts
 htmlcov/

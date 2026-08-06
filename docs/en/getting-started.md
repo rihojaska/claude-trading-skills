@@ -13,6 +13,11 @@ permalink: /en/getting-started/
 Installation instructions, API key setup, and a hands-on tutorial to run your first skill.
 {: .fs-6 .fw-300 }
 
+New to the project? The [FAQ]({{ '/en/faq/' | relative_url }}) answers common
+questions about access, cost, safety, and scope. New to the trading vocabulary
+used below? Keep the [Glossary]({{ '/en/glossary/' | relative_url }}) open as a
+plain-language reference.
+
 <details open markdown="block">
   <summary>Table of Contents</summary>
   {: .text-delta }
@@ -24,9 +29,19 @@ Installation instructions, API key setup, and a hands-on tutorial to run your fi
 
 ## Prerequisites
 
+> **What this actually costs:** Claude Web Skills are currently available on
+> Free, Pro, Max, Team, and Enterprise accounts. Claude Code has separate account
+> requirements and is not included with the Claude.ai Free plan. FMP, FINVIZ
+> Elite, and Alpaca are optional or skill-specific integrations; the five-skill
+> starter path does not require a paid market-data API subscription. Verify
+> current access in Anthropic's
+> [Skills help](https://support.claude.com/en/articles/12512180-use-skills-in-claude)
+> and [Claude Code setup guide](https://code.claude.com/docs/en/getting-started).
+{: .note }
+
 | Item | Required | Description |
 |------|----------|-------------|
-| Claude Account | Yes | Pro, Team, or Enterprise plan (plans that support the Skills feature) |
+| Claude Account | Yes | Claude Web account with Skills access, or a separately eligible Claude Code account |
 | Python 3.9+ | Yes | Required for helper scripts. Most skills use Python-based data fetching |
 | FMP API Key | Optional | Financial Modeling Prep API. Required by screening skills (free tier available) |
 | FINVIZ Elite | Optional | Speeds up dividend screeners 70-80% and improves Theme Detector coverage |
@@ -39,11 +54,11 @@ Installation instructions, API key setup, and a hands-on tutorial to run your fi
 ### Claude Web App
 
 1. Download the `.skill` file (ZIP format) for the skill you want from the [`skill-packages/`](https://github.com/tradermonty/claude-trading-skills/tree/main/skill-packages) directory.
-2. Open Claude in your browser and navigate to **Settings > Skills**.
-3. Upload the downloaded `.skill` file.
-4. The skill activates automatically in new conversations.
+2. For an individual account, open **Settings > Capabilities** and enable **Code execution and file creation**. Team and Enterprise users may need an organization owner to enable Skills.
+3. Open **Customize > Skills** and upload the downloaded `.skill` file.
+4. Confirm that the skill appears in Customize > Skills, and enable it if needed.
 
-> See Anthropic's [Skills launch post](https://www.anthropic.com/news/skills) for a feature overview.
+> See Anthropic's [current Skills help](https://support.claude.com/en/articles/12512180-use-skills-in-claude) for account-specific setup and troubleshooting.
 {: .note }
 
 ### Claude Code (Desktop / CLI)
@@ -52,14 +67,20 @@ Installation instructions, API key setup, and a hands-on tutorial to run your fi
 # 1. Clone the repository
 git clone https://github.com/tradermonty/claude-trading-skills.git
 
-# 2. Copy the desired skill folder to your Claude Code Skills directory
-#    (Find the path via Claude Code -> Settings -> Skills -> Open Skills Folder)
-cp -r claude-trading-skills/skills/finviz-screener /path/to/skills-directory/
+# 2. Copy the desired skill folder to your personal Claude Code skills directory
+mkdir -p ~/.claude/skills
+cp -r claude-trading-skills/skills/finviz-screener ~/.claude/skills/
 
-# 3. Restart or reload Claude Code to detect the new skill
+# 3. Restart only if the top-level skills directory was created after startup
 ```
 
-> Source folders and `.skill` packages contain identical content. Edit a source folder to customize a skill, then re-zip it for distribution via the web app.
+> Claude Code can also discover project-only skills from
+> `.claude/skills/`. See the
+> [Claude Code setup guide](https://code.claude.com/docs/en/getting-started)
+> for supported accounts and installation.
+{: .note }
+
+> `.skill` packages are built from source folders with tests and local build artifacts omitted. Edit a source folder to customize a skill, then run `python3 scripts/package_skills.py --skill <skill-name>` before distributing it via the web app.
 {: .tip }
 
 ---
@@ -103,7 +124,9 @@ export FINVIZ_API_KEY=your_key_here
 
 ### Alpaca Trading
 
-Required for the Portfolio Manager skill to fetch real-time holdings and execute trades.
+Required for Portfolio Manager to retrieve live holdings for analysis and
+rebalancing proposals. This read-and-analyze integration does not submit broker orders;
+separate human confirmation and execution are required.
 
 | Plan | Cost | Notes |
 |------|------|-------|
@@ -159,7 +182,7 @@ Find stocks with EPS growth > 25% and price above SMA200
 |-------|-----|
 | `name` field in SKILL.md does not match the folder name | Verify that `name` in the YAML frontmatter exactly matches the skill folder name |
 | Skill folder placed in the wrong directory | Confirm the folder is inside Claude Code's Skills directory |
-| Claude Code not restarted | Restart Claude Code after adding a new skill |
+| Top-level skills directory created after this session started | Restart Claude Code once. Changes inside an existing skills directory are detected automatically |
 
 ### API Key Errors
 

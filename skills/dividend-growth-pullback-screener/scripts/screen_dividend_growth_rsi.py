@@ -28,7 +28,7 @@ import json
 import os
 import sys
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -182,7 +182,7 @@ class FINVIZClient:
 
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
 _FMP_HIST_ENDPOINTS = [
-    ("https://financialmodelingprep.com/stable/historical-price-full", True),
+    ("https://financialmodelingprep.com/stable/historical-price-eod/full", True),
     ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
 ]
 
@@ -191,8 +191,20 @@ class FMPClient:
     """Financial Modeling Prep API client with rate limiting."""
 
     BASE_URL = "https://financialmodelingprep.com/api/v3"
+    STABLE_URL = "https://financialmodelingprep.com/stable"
 
     _ENDPOINT_FAILURE_THRESHOLD = 3
+    # v3 path-style endpoints whose trailing symbol moves to a ?symbol= query
+    # on /stable (e.g. v3 income-statement/AAPL -> stable income-statement?symbol=AAPL)
+    _SYMBOL_QUERY_ENDPOINTS = (
+        "income-statement",
+        "balance-sheet-statement",
+        "cash-flow-statement",
+        "key-metrics",
+        "ratios",
+        "profile",
+        "quote",
+    )
 
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -204,19 +216,88 @@ class FMPClient:
         self._endpoint_failures: dict[str, int] = {}
         self._disabled_endpoints: set[str] = set()
 
-    def _get(self, endpoint: str, params: Optional[dict] = None) -> Optional[dict]:
-        """Execute GET request with rate limiting and error handling."""
+    def _request(self, url: str, params: dict, quiet: bool = False) -> Optional[dict]:
+        """Single rate-limited GET. Returns parsed JSON, or None on failure.
+
+        Non-final endpoints pass quiet=True to suppress the expected 403 a new
+        key gets on the v3 fallback.
+        """
         if self.rate_limit_reached:
             return None
 
         if params is None:
             params = {}
 
-        result = fmp_get(f"/api/v3/{endpoint}", params=params, timeout=30)
+        result = fmp_get(url, params=params, timeout=30)
         time.sleep(0.3)  # Rate limiting: 0.3s between requests
-        if result is None:
-            print(f"WARNING: FMP request failed or quota-limited: {endpoint}", file=sys.stderr)
+        if result is None and not quiet:
+            print(f"WARNING: FMP request failed or quota-limited: {url}", file=sys.stderr)
         return result
+
+    def _stable_spec(self, endpoint: str, params: dict) -> Optional[tuple]:
+        """Map a v3 path-style endpoint to its (stable_url, stable_params).
+
+        Returns None when there is no known /stable equivalent.
+        """
+        p = dict(params or {})
+        if endpoint == "stock-screener":
+            return f"{self.STABLE_URL}/company-screener", p
+        if endpoint.startswith("historical-price-full/stock_dividend/"):
+            p["symbol"] = endpoint.rsplit("/", 1)[-1]
+            return f"{self.STABLE_URL}/dividends", p
+        head, _, sym = endpoint.partition("/")
+        if sym and head in self._SYMBOL_QUERY_ENDPOINTS:
+            p["symbol"] = sym
+            return f"{self.STABLE_URL}/{head}", p
+        return None
+
+    @staticmethod
+    def _normalize(endpoint: str, data):
+        """Reshape /stable responses to match the v3 shapes callers expect."""
+        if data is None:
+            return None
+        # Dividends: /stable returns a flat list; v3 returned {"historical": [...]}.
+        if endpoint.startswith("historical-price-full/stock_dividend/"):
+            return {"historical": data} if isinstance(data, list) else data
+        # key-metrics: /stable renamed roe -> returnOnEquity (same ratio scale).
+        if endpoint.startswith("key-metrics/") and isinstance(data, list):
+            for rec in data:
+                if isinstance(rec, dict) and "roe" not in rec and "returnOnEquity" in rec:
+                    rec["roe"] = rec["returnOnEquity"]
+        # cash-flow: /stable renamed dividendsPaid -> netDividendsPaid (same
+        # negative-outflow value; callers take abs()).
+        if endpoint.startswith("cash-flow-statement/") and isinstance(data, list):
+            for rec in data:
+                if (
+                    isinstance(rec, dict)
+                    and "dividendsPaid" not in rec
+                    and "netDividendsPaid" in rec
+                ):
+                    rec["dividendsPaid"] = rec["netDividendsPaid"]
+        return data
+
+    def _get(self, endpoint: str, params: Optional[dict] = None) -> Optional[dict]:
+        """GET an FMP endpoint, preferring /stable with a v3 path-style fallback.
+
+        Callers still pass the legacy v3 path-style `endpoint` strings (e.g.
+        "income-statement/AAPL"); this routes them to the /stable query-style
+        equivalents and normalizes the response back to the v3 shape. Keys
+        issued after 2025-08-31 only work on /stable; legacy keys fall back to v3.
+        """
+        if self.rate_limit_reached:
+            return None
+        params = params or {}
+        attempts = []
+        spec = self._stable_spec(endpoint, params)
+        if spec:
+            attempts.append(spec)  # /stable first
+        attempts.append((f"{self.BASE_URL}/{endpoint}", dict(params)))  # v3 fallback
+        for i, (url, req_params) in enumerate(attempts):
+            quiet = i < len(attempts) - 1
+            data = self._request(url, req_params, quiet=quiet)
+            if data is not None:
+                return self._normalize(endpoint, data)
+        return None
 
     def screen_stocks(self, min_market_cap: int = 2000000000, exchange: str = None) -> list[dict]:
         """Screen stocks by market cap and exchange."""
@@ -228,13 +309,23 @@ class FMPClient:
         return result if result else []
 
     def get_historical_prices(self, symbol: str, days: int = 30) -> Optional[list[dict]]:
-        """Get historical daily prices (stable endpoint with v3 fallback)."""
+        """Get historical daily prices, most-recent-first (/stable, v3 fallback).
+
+        /stable/historical-price-eod/full returns a flat list of OHLCV bars and
+        is bounded with from/to; the v3 fallback returns {"historical": [...]}.
+        """
         for base_url, is_stable in _FMP_HIST_ENDPOINTS:
             if base_url in self._disabled_endpoints:
                 continue
             if is_stable:
                 url = base_url
-                params = {"symbol": symbol, "timeseries": days}
+                today = datetime.now().date()
+                params = {
+                    "symbol": symbol,
+                    # ~days trading days needs ~2x calendar days; +10 for slack.
+                    "from": (today - timedelta(days=days * 2 + 10)).isoformat(),
+                    "to": today.isoformat(),
+                }
             else:
                 url = f"{base_url}/{symbol}"
                 params = {"timeseries": days}
@@ -245,6 +336,14 @@ class FMPClient:
                     self._record_endpoint_failure(base_url)
                     continue
                 data = response.json()
+                # /stable: flat list of bars (most-recent-first).
+                if isinstance(data, list):
+                    if data:
+                        self._endpoint_failures[base_url] = 0
+                        return data[:days]
+                    self._record_endpoint_failure(base_url)
+                    continue
+                # v3: {"symbol": ..., "historical": [...]}.
                 if isinstance(data, dict) and "historical" in data:
                     self._endpoint_failures[base_url] = 0
                     return data["historical"]
@@ -1032,8 +1131,11 @@ def screen_dividend_growth_pullbacks(
             "debt_to_equity": health_metrics.get("debt_to_equity"),
             "current_ratio": health_metrics.get("current_ratio"),
             "financially_healthy": health_metrics.get("financially_healthy", False),
-            "roe": latest_metrics.get("roe", 0),
-            "profit_margin": latest_metrics.get("netProfitMargin", 0),
+            # roe and netProfitMargin from FMP are decimals (e.g., 0.25 = 25%),
+            # like payoutRatio above; convert to whole-number percents so they
+            # match the composite-score thresholds and the report's "%" display.
+            "roe": (latest_metrics.get("roe") or 0) * 100,
+            "profit_margin": (latest_metrics.get("netProfitMargin") or 0) * 100,
         }
 
         # Calculate composite score
@@ -1265,7 +1367,7 @@ High dividend growth stocks (12%+ CAGR) compound wealth through rising dividends
 """
 
     # Write report
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         f.write(report)
 
     print(f"✅ Markdown report saved: {output_path}", file=sys.stderr)
@@ -1415,7 +1517,7 @@ Environment Variables:
     }
 
     json_path = os.path.join(logs_dir, f"dividend_growth_pullback_results_{today}.json")
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump(json_output, f, indent=2)
 
     print(f"✅ JSON results saved: {json_path}", file=sys.stderr)

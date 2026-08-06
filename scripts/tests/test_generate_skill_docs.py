@@ -12,8 +12,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from generate_skill_docs import (
     HAND_WRITTEN,
+    NAV_ORDER_START,
+    _doc_is_generated,
     _extract_catalog_slugs,
     _generate_buttons,
+    _marker_present_but_invalid,
     _slugify,
     _split_sections,
     _title_case,
@@ -104,6 +107,7 @@ def tmp_claude_md(tmp_path):
         | **Free Skill** | ❌ Not required | ❌ Not used | ❌ Not used | No API needed |
         | **Optional Skill** | 🟡 Optional | 🟡 Optional (Recommended) | ❌ Not used | Both optional |
         | **Alpaca Skill** | ❌ Not required | ❌ Not used | ✅ Required | Needs Alpaca |
+        | **Stockbee 20% Study** | ✅ Required | ❌ Not used | ❌ Not used | FMP live data |
 
         ### Running Helper Scripts
 
@@ -178,6 +182,11 @@ class TestParseApiRequirements:
         reqs = parse_api_requirements(tmp_claude_md)
         assert "alpaca-skill" in reqs
         assert "Required" in reqs["alpaca-skill"]["alpaca"]
+
+    def test_percent_display_name_adds_pct_slug_alias(self, tmp_claude_md):
+        reqs = parse_api_requirements(tmp_claude_md)
+        assert "stockbee-20pct-study" in reqs
+        assert "Required" in reqs["stockbee-20pct-study"]["fmp"]
 
 
 class TestParseCLIExamples:
@@ -393,12 +402,16 @@ class TestMain:
         # backtest-expert should not be generated (hand-written)
         assert not (docs_dir / "en" / "skills" / "backtest-expert.md").exists()
 
-    def test_overwrite_regenerates(self, tmp_skill, tmp_claude_md):
+    def test_overwrite_skips_protected_absent_marker(self, tmp_skill, tmp_claude_md):
+        # BEHAVIOR CHANGE (Follow-up B): a page with no `generated:` marker is
+        # hand-maintained/protected. --overwrite (without --force) must NOT
+        # destroy it. (Previously this test asserted --overwrite regenerated a
+        # markerless page; the ownership guard intentionally flips that.)
         docs_dir = tmp_skill / "docs"
         en_path = docs_dir / "en" / "skills" / "test-skill.md"
         en_path.parent.mkdir(parents=True)
         (docs_dir / "ja" / "skills").mkdir(parents=True)
-        en_path.write_text("old content")
+        en_path.write_text("old hand-maintained content")
 
         main(
             [
@@ -411,8 +424,7 @@ class TestMain:
                 "--overwrite",
             ]
         )
-        assert "old content" not in en_path.read_text()
-        assert "Test Skill" in en_path.read_text()
+        assert en_path.read_text() == "old hand-maintained content"
 
     def test_main_updates_index(self, tmp_skill, tmp_claude_md):
         docs_dir = tmp_skill / "docs"
@@ -464,6 +476,233 @@ class TestMain:
             ]
         )
         assert not (docs_dir / "en" / "skills" / "empty-skill.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Tests: ownership guard + --check (Follow-up B)
+# ---------------------------------------------------------------------------
+
+
+def _base_args(tmp_skill, tmp_claude_md):
+    return [
+        "--skills-dir",
+        str(tmp_skill / "skills"),
+        "--docs-dir",
+        str(tmp_skill / "docs"),
+        "--claude-md",
+        str(tmp_claude_md),
+    ]
+
+
+class TestOwnershipGuardAndCheck:
+    def test_new_page_stamped_generated_true(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        (docs_dir / "en" / "skills").mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        main(_base_args(tmp_skill, tmp_claude_md))
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        assert _doc_is_generated(en) is True
+        assert _doc_is_generated(ja) is True
+
+    def test_overwrite_skips_protected_generated_false(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        body = "---\ntitle: x\ngenerated: false\n---\nhand body\n"
+        en.write_text(body)
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--overwrite"])
+        assert en.read_text() == body
+
+    def test_overwrite_rewrites_generated_true(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        en.write_text("---\ntitle: x\ngenerated: true\n---\nstale generated body\n")
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--overwrite"])
+        out = en.read_text()
+        assert "stale generated body" not in out
+        assert "Test Skill" in out
+        assert _doc_is_generated(en) is True
+
+    def test_force_overrides_protection(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        en.write_text("hand body, no marker")
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--overwrite", "--force"])
+        out = en.read_text()
+        assert "hand body, no marker" not in out
+        assert "Test Skill" in out
+
+    def test_hand_written_missing_not_generated_normal(self, tmp_skill, tmp_claude_md):
+        hw = tmp_skill / "skills" / "backtest-expert"
+        hw.mkdir()
+        (hw / "SKILL.md").write_text("---\nname: backtest-expert\ndescription: t\n---\n")
+        docs_dir = tmp_skill / "docs"
+        (docs_dir / "en" / "skills").mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        main(_base_args(tmp_skill, tmp_claude_md))
+        assert not (docs_dir / "en" / "skills" / "backtest-expert.md").exists()
+
+    def test_hand_written_missing_generated_with_force(self, tmp_skill, tmp_claude_md):
+        hw = tmp_skill / "skills" / "backtest-expert"
+        hw.mkdir()
+        (hw / "SKILL.md").write_text("---\nname: backtest-expert\ndescription: t\n---\n")
+        docs_dir = tmp_skill / "docs"
+        (docs_dir / "en" / "skills").mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--force"])
+        assert (docs_dir / "en" / "skills" / "backtest-expert.md").exists()
+
+    def test_hand_written_existing_protected_under_overwrite(self, tmp_skill, tmp_claude_md):
+        hw = tmp_skill / "skills" / "backtest-expert"
+        hw.mkdir()
+        (hw / "SKILL.md").write_text("---\nname: backtest-expert\ndescription: t\n---\n")
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "backtest-expert.md"
+        en.parent.mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        en.write_text("hand-written guide body")
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--overwrite"])
+        assert en.read_text() == "hand-written guide body"
+
+    def test_mixed_ownership_en_owned_ja_protected(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        en.write_text("---\ntitle: x\ngenerated: true\n---\nstale en\n")
+        ja_body = "---\ntitle: x\n---\n# 手動翻訳された日本語ページ\n"
+        ja.write_text(ja_body)
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--overwrite"])
+        assert "stale en" not in en.read_text()
+        assert "Test Skill" in en.read_text()
+        assert ja.read_text() == ja_body  # JA hand-translation byte-unchanged
+
+    def test_brand_new_one_side_non_hand_written(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        ja_body = "---\ntitle: x\n---\n# 既存の手動翻訳\n"
+        ja.write_text(ja_body)
+        # EN missing, JA exists & protected, NORMAL run (no --overwrite)
+        main(_base_args(tmp_skill, tmp_claude_md))
+        assert en.exists()
+        assert _doc_is_generated(en) is True
+        assert ja.read_text() == ja_body  # JA untouched
+
+    def test_check_protects_hand_written_even_with_generated_true(self, tmp_skill, tmp_claude_md):
+        # A HAND_WRITTEN page is ALWAYS protected, even if it carries
+        # generated: true (e.g. stamped earlier via --force). --check must NOT
+        # content-compare it.
+        hw = tmp_skill / "skills" / "backtest-expert"
+        hw.mkdir()
+        (hw / "SKILL.md").write_text("---\nname: backtest-expert\ndescription: t\n---\n")
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "backtest-expert.md"
+        ja = docs_dir / "ja" / "skills" / "backtest-expert.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        en.write_text("---\ntitle: x\ngenerated: true\n---\nwildly divergent hand body\n")
+        ja.write_text("---\ntitle: x\ngenerated: true\n---\n手動の全く違う本文\n")
+        # tmp_skill always creates skills/test-skill too; give it protected
+        # pages so existence checks don't trip (focus is the HW assertion).
+        (docs_dir / "en" / "skills" / "test-skill.md").write_text("protected en\n")
+        (docs_dir / "ja" / "skills" / "test-skill.md").write_text("protected ja\n")
+        rc = main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert rc == 0
+
+    def test_check_passes_when_protected_body_differs(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        en.write_text("wildly different EN, no marker\n")
+        ja.write_text("全く違う日本語、マーカーなし\n")
+        rc = main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert rc == 0
+
+    def test_check_fails_on_generated_true_drift(self, tmp_skill, tmp_claude_md, capsys):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        en.write_text("---\ntitle: x\ngenerated: true\n---\nstale owned body\n")
+        ja.write_text("---\ntitle: x\n---\nhand ja\n")
+        rc = main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert rc == 1
+        assert "DRIFT:" in capsys.readouterr().err
+
+    def test_check_fails_on_missing_page(self, tmp_skill, tmp_claude_md, capsys):
+        docs_dir = tmp_skill / "docs"
+        (docs_dir / "en" / "skills").mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        # neither EN nor JA exists for test-skill
+        rc = main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert rc == 1
+        assert "does not exist" in capsys.readouterr().err
+
+    def test_check_reports_invalid_marker(self, tmp_skill, tmp_claude_md, capsys):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        en.write_text("---\ntitle: x\ngenerated: maybe\n---\nbody\n")
+        ja.write_text("---\ntitle: x\n---\nbody\n")
+        rc = main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert rc == 1
+        assert "invalid 'generated:' marker" in capsys.readouterr().err
+
+    def test_check_passes_clean_after_generate(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        (docs_dir / "en" / "skills").mkdir(parents=True)
+        (docs_dir / "ja" / "skills").mkdir(parents=True)
+        main(_base_args(tmp_skill, tmp_claude_md))
+        rc = main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert rc == 0
+
+    def test_check_performs_no_writes(self, tmp_skill, tmp_claude_md):
+        docs_dir = tmp_skill / "docs"
+        en = docs_dir / "en" / "skills" / "test-skill.md"
+        ja = docs_dir / "ja" / "skills" / "test-skill.md"
+        en.parent.mkdir(parents=True)
+        ja.parent.mkdir(parents=True)
+        en.write_text("protected en\n")
+        ja.write_text("protected ja\n")
+        before = (en.read_text(), ja.read_text(), en.stat().st_mtime_ns)
+        main(_base_args(tmp_skill, tmp_claude_md) + ["--check"])
+        assert (en.read_text(), ja.read_text(), en.stat().st_mtime_ns) == before
+        # No index/catalog created as a side effect of --check
+        assert not (docs_dir / "en" / "skills" / "index.md").exists()
+
+    def test_doc_is_generated_helper(self, tmp_path):
+        true_p = tmp_path / "t.md"
+        true_p.write_text("---\ntitle: a: b\ngenerated: true\n---\nx")
+        false_p = tmp_path / "f.md"
+        false_p.write_text("---\ngenerated: false\n---\nx")
+        absent_p = tmp_path / "a.md"
+        absent_p.write_text("---\ntitle: x\n---\nx")
+        invalid_p = tmp_path / "i.md"
+        invalid_p.write_text("---\ngenerated: maybe\n---\nx")
+        missing_p = tmp_path / "nope.md"
+        assert _doc_is_generated(true_p) is True
+        assert _doc_is_generated(false_p) is False
+        assert _doc_is_generated(absent_p) is None
+        assert _doc_is_generated(invalid_p) is None
+        assert _doc_is_generated(missing_p) is None
+        assert _marker_present_but_invalid(invalid_p) is True
+        assert _marker_present_but_invalid(true_p) is False
+        assert _marker_present_but_invalid(absent_p) is False
 
 
 # ---------------------------------------------------------------------------
@@ -884,3 +1123,147 @@ class TestUpdateCatalogApiMatrix:
         content = catalog.read_text()
         # free-skill should not be added to JA because all values are "-"
         assert "Free Skill" not in content
+
+
+# ---------------------------------------------------------------------------
+# Tests: nav_order assignment under `--skill` (regression for the bug where
+# `main()` computed nav_order from the filtered single-skill list instead of
+# a full-repo scan, so every `--skill <name>` run collapsed to NAV_ORDER_START
+# regardless of the target's alphabetical position -- which then mismatched
+# what `--check` computes from a full scan and caused guaranteed drift).
+# ---------------------------------------------------------------------------
+
+
+class TestSkillFlagNavOrderAssignment:
+    def _make_skill(self, skills_dir: Path, name: str) -> None:
+        """Create a minimal, renderable skill directory (mirrors `tmp_skill`)."""
+        skill_dir = skills_dir / name
+        skill_dir.mkdir(parents=True)
+        title = name.replace("-", " ").title()
+        (skill_dir / "SKILL.md").write_text(
+            textwrap.dedent(f"""\
+            ---
+            name: {name}
+            description: A test skill named {title} for the nav_order regression test.
+            ---
+
+            # {title}
+
+            ## Overview
+
+            This is a test skill.
+
+            ## When to Use
+
+            Use when testing.
+
+            ## Prerequisites
+
+            - No API key required
+
+            ## Workflow
+
+            ### Step 1: Run it
+
+            ```bash
+            python3 scripts/run.py
+            ```
+            """)
+        )
+
+    def test_skill_flag_assigns_full_scan_nav_order_not_start(self, tmp_path):
+        """3 skills, sorted alphabetically: alpha-skill, beta-skill,
+        gamma-target. gamma-target is 3rd, so a full-repo scan assigns it
+        NAV_ORDER_START + 2. Running `--skill gamma-target` alone must
+        assign the SAME value -- not collapse to NAV_ORDER_START as if it
+        were the only skill in the repo."""
+        skills_dir = tmp_path / "skills"
+        docs_dir = tmp_path / "docs"
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# CLAUDE.md\n\n#### API Requirements by Skill\n\n")
+
+        for name in ["alpha-skill", "beta-skill", "gamma-target"]:
+            self._make_skill(skills_dir, name)
+
+        exit_code = main(
+            [
+                "--skill",
+                "gamma-target",
+                "--skills-dir",
+                str(skills_dir),
+                "--docs-dir",
+                str(docs_dir),
+                "--claude-md",
+                str(claude_md),
+                "--skill-packages-dir",
+                str(tmp_path / "skill-packages"),  # doesn't exist -> resolved to None
+            ]
+        )
+        assert exit_code == 0
+
+        page = (docs_dir / "en" / "skills" / "gamma-target.md").read_text()
+        expected_nav_order = NAV_ORDER_START + 2  # alpha=0, beta=1, gamma-target=2
+        assert f"nav_order: {expected_nav_order}" in page
+        assert f"nav_order: {NAV_ORDER_START}\n" not in page
+
+        # Only gamma-target was requested via --skill; alpha/beta pages must
+        # not have been written at all (the write loop stays scoped to the
+        # requested skill even though nav_order is computed from the full set).
+        assert not (docs_dir / "en" / "skills" / "alpha-skill.md").exists()
+        assert not (docs_dir / "en" / "skills" / "beta-skill.md").exists()
+
+    def test_skill_flag_matches_full_scan_check_nav_order(self, tmp_path, capsys):
+        """The nav_order a `--skill`-scoped run assigns must equal what a
+        subsequent full-repo `--check` run would independently compute --
+        this is exactly the invariant that broke before the fix (a `--skill`
+        write followed by `--check` reported drift on the very same page).
+
+        alpha-skill/beta-skill are deliberately never generated here (only
+        gamma-target is), so `--check` legitimately reports them as missing
+        -- that's unrelated to nav_order and is not what this test asserts.
+        The assertion is specifically that gamma-target's page matches.
+        """
+        skills_dir = tmp_path / "skills"
+        docs_dir = tmp_path / "docs"
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# CLAUDE.md\n\n#### API Requirements by Skill\n\n")
+
+        for name in ["alpha-skill", "beta-skill", "gamma-target"]:
+            self._make_skill(skills_dir, name)
+
+        write_exit = main(
+            [
+                "--skill",
+                "gamma-target",
+                "--overwrite",
+                "--skills-dir",
+                str(skills_dir),
+                "--docs-dir",
+                str(docs_dir),
+                "--claude-md",
+                str(claude_md),
+                "--skill-packages-dir",
+                str(tmp_path / "skill-packages"),
+            ]
+        )
+        assert write_exit == 0
+        capsys.readouterr()  # discard write-phase output
+
+        main(
+            [
+                "--check",
+                "--skills-dir",
+                str(skills_dir),
+                "--docs-dir",
+                str(docs_dir),
+                "--claude-md",
+                str(claude_md),
+                "--skill-packages-dir",
+                str(tmp_path / "skill-packages"),
+            ]
+        )
+        check_lines = capsys.readouterr().err.splitlines()
+        assert any(
+            line.startswith("OK:") and "gamma-target.md matches" in line for line in check_lines
+        )
+        assert not any(line.startswith("DRIFT:") and "gamma-target" in line for line in check_lines)
