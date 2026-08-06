@@ -34,7 +34,6 @@ if str(SKILL_ROOT) not in sys.path:
 
 from fmp_compat import fmp_get, get_fmp_keys
 
-
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
 
 

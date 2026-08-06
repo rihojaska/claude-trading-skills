@@ -8,6 +8,55 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# ---------------------------------------------------------------------------
+# Transport harness: the client transports via module-level fmp_compat.fmp_get
+# (which swallows HTTP status — 402/403/429 and a genuine empty all surface as
+# None), not requests.Session. Route fmp_get through each test's
+# `client.session.get` mock (200 -> parsed JSON, else None) so the fallback
+# tests keep exercising _request_with_fallback hermetically.
+# ---------------------------------------------------------------------------
+
+_ACTIVE: dict = {}
+
+
+def _fake_fmp_get(url, params=None, timeout=30, **_kw):
+    client = _ACTIVE.get("client")
+    assert client is not None, "transport used before _make_client()"
+    resp = client.session.get(url, params=params, timeout=timeout)
+    if resp is None or getattr(resp, "status_code", 200) != 200:
+        return None
+    return resp.json()
+
+
+def _wire_fake_transport(client):
+    """Register the client and patch fmp_get in its module's namespace.
+
+    Patching `type(client)._rate_limited_get.__globals__` targets the exact
+    namespace the method resolves `fmp_get` against, which stays correct even
+    when conftest evicts and re-imports `fmp_client` between skill suites.
+    """
+    _ACTIVE["client"] = client
+    globs = type(client)._rate_limited_get.__globals__
+    if globs.get("fmp_get") is not _fake_fmp_get:
+        _ACTIVE.setdefault("patched", []).append((globs, globs["fmp_get"]))
+        globs["fmp_get"] = _fake_fmp_get
+
+
+def _no_yf(client):
+    """Context manager: yfinance fallback unavailable (helpers return None)."""
+    return patch.dict(
+        type(client)._rate_limited_get.__globals__,
+        {"_yf_quote": lambda *a, **k: None, "_yf_history": lambda *a, **k: None},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _restore_transport():
+    yield
+    for globs, orig in _ACTIVE.get("patched", []):
+        globs["fmp_get"] = orig
+    _ACTIVE.clear()
+
 
 class TestVixTermStructure:
     """Test VIX term structure auto-classification."""
@@ -18,6 +67,7 @@ class TestVixTermStructure:
             from fmp_client import FMPClient
 
             client = FMPClient(api_key="test_key")
+        _wire_fake_transport(client)
         return client
 
     def test_steep_contango(self):
@@ -87,6 +137,7 @@ class TestEndpointFallback:
 
             client = FMPClient(api_key="test_key")
         client.RATE_LIMIT_DELAY = 0  # disable rate limiting in tests
+        _wire_fake_transport(client)
         return client
 
     # ------------------------------------------------------------------
@@ -137,8 +188,8 @@ class TestEndpointFallback:
         client.session.get = mock_get
         # Simulate yfinance fallback also unavailable so the "all sources
         # failed -> None" contract still holds.
-        client._get_hist_from_yfinance = lambda *a, **k: None
-        result = client.get_quote("^GSPC")
+        with _no_yf(client):
+            result = client.get_quote("^GSPC")
         assert result is None
 
     def test_historical_fallback_to_v3(self):
@@ -234,8 +285,8 @@ class TestEndpointFallback:
 
         client.session.get = mock_get
         # Simulate yfinance fallback also unavailable.
-        client._get_hist_from_yfinance = lambda *a, **k: None
-        result = client.get_historical_prices("^GSPC", days=80)
+        with _no_yf(client):
+            result = client.get_historical_prices("^GSPC", days=80)
         assert result is None
 
     # ------------------------------------------------------------------
@@ -547,6 +598,7 @@ class TestEODFlatListSuccess:
 
             client = FMPClient(api_key="test_key")
         client.max_retries = 0
+        _wire_fake_transport(client)
         return client
 
     @patch("fmp_client.requests.Session")
@@ -632,7 +684,9 @@ def _make_client():
     with patch.dict(os.environ, {"FMP_API_KEY": "test_key"}):
         from fmp_client import FMPClient
 
-        return FMPClient(api_key="test_key")
+        client = FMPClient(api_key="test_key")
+    _wire_fake_transport(client)
+    return client
 
 
 class TestYFinanceFallback:

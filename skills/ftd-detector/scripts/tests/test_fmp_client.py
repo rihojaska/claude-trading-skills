@@ -17,11 +17,61 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fmp_client import FMPClient
 
+# ---------------------------------------------------------------------------
+# Transport harness: the client transports via module-level fmp_compat.fmp_get
+# (which swallows HTTP status — 402/403/429 and a genuine empty all surface as
+# None), not requests.Session. Route fmp_get through each test's
+# `client.session.get` mock (200 -> parsed JSON, else None) so the fallback
+# tests keep exercising _request_with_fallback hermetically.
+# ---------------------------------------------------------------------------
+
+_ACTIVE: dict = {}
+
+
+def _fake_fmp_get(url, params=None, timeout=30, **_kw):
+    client = _ACTIVE.get("client")
+    assert client is not None, "transport used before _make_client()"
+    resp = client.session.get(url, params=params, timeout=timeout)
+    if resp is None or getattr(resp, "status_code", 200) != 200:
+        return None
+    return resp.json()
+
+
+def _wire_fake_transport(client):
+    """Register the client and patch fmp_get in its module's namespace.
+
+    Patching `type(client)._rate_limited_get.__globals__` targets the exact
+    namespace the method resolves `fmp_get` against, which stays correct even
+    when conftest evicts and re-imports `fmp_client` between skill suites.
+    """
+    _ACTIVE["client"] = client
+    globs = type(client)._rate_limited_get.__globals__
+    if globs.get("fmp_get") is not _fake_fmp_get:
+        _ACTIVE.setdefault("patched", []).append((globs, globs["fmp_get"]))
+        globs["fmp_get"] = _fake_fmp_get
+
+
+def _no_yf(client):
+    """Context manager: yfinance fallback unavailable (helpers return None)."""
+    return patch.dict(
+        type(client)._rate_limited_get.__globals__,
+        {"_yf_quote": lambda *a, **k: None, "_yf_history": lambda *a, **k: None},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _restore_transport():
+    yield
+    for globs, orig in _ACTIVE.get("patched", []):
+        globs["fmp_get"] = orig
+    _ACTIVE.clear()
+
 
 def _make_client():
     """Create an FMPClient with a fake API key and zero rate-limit delay."""
     client = FMPClient(api_key="test_key")
     client.RATE_LIMIT_DELAY = 0
+    _wire_fake_transport(client)
     return client
 
 
@@ -76,14 +126,15 @@ class TestFallbackLogic:
         assert client.session.get.call_count == 2
 
     def test_quote_both_fail(self):
-        """Both 403 -> returns None."""
+        """Both 403 and yfinance unavailable -> returns None."""
         client = _make_client()
         stable_resp = _mock_response(403)
         v3_resp = _mock_response(403)
 
         client.session.get = MagicMock(side_effect=[stable_resp, v3_resp])
 
-        result = client.get_quote("^GSPC")
+        with _no_yf(client):
+            result = client.get_quote("^GSPC")
         assert result is None
 
     def test_historical_fallback_to_v3(self):
@@ -170,7 +221,7 @@ class TestResponseNormalization:
         assert client.session.get.call_count == 2
 
     def test_historical_batch_no_match_returns_none_when_v3_also_fails(self):
-        """Stable batch no match + v3 403 -> None."""
+        """Stable batch no match + v3 403 + yfinance unavailable -> None."""
         client = _make_client()
         batch_data = {
             "historicalStockList": [
@@ -185,7 +236,8 @@ class TestResponseNormalization:
 
         client.session.get = MagicMock(side_effect=[stable_resp, v3_resp])
 
-        result = client.get_historical_prices("^GSPC", days=80)
+        with _no_yf(client):
+            result = client.get_historical_prices("^GSPC", days=80)
         assert result is None
 
 

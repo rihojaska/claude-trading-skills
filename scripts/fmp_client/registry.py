@@ -128,19 +128,25 @@ SKILLS: dict[str, SkillConfig] = {
         extensions=("sp500_constituents", "family_a_quote", "parabolic"),
         batch_days=260,
     ),
+    # Special since the fmp_compat.fmp_get transport port: the shared-transport
+    # rewrite (repo-root fmp_get + yfinance fallback + data_sources provenance)
+    # diverges from the family-A core in _rate_limited_get, get_quote,
+    # get_historical_prices and get_api_stats, so ftd renders standalone like
+    # the other yfinance-fallback specials.
     "ftd-detector": SkillConfig(
         skill="ftd-detector",
         title="FMP API Client for FTD Detector",
-        family="A",
+        family="special",
         has_quote=True,
         budget=False,
         hist_days=365,
         hist_return_list=False,
         has_compat=False,
-        feature_lines=("- Batch quote support",),
+        feature_lines=(),
         class_constants=(),
-        extensions=("family_a_quote", "ftd"),
+        extensions=(),
         batch_days=50,
+        standalone_template="ftd.py.tmpl",
     ),
     "canslim-screener": SkillConfig(
         skill="canslim-screener",

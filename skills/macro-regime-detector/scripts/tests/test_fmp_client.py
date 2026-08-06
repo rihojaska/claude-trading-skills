@@ -4,14 +4,58 @@ import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from fmp_client import FMPClient
+
+# ---------------------------------------------------------------------------
+# Transport harness: the client transports via module-level fmp_compat.fmp_get
+# (which swallows HTTP status — 402/403/429 and a genuine empty all surface as
+# None), not requests.Session. Route fmp_get through each test's
+# `client.session.get` mock (200 -> parsed JSON, else None) so the endpoint
+# tests stay hermetic.
+# ---------------------------------------------------------------------------
+
+_ACTIVE: dict = {}
+
+
+def _fake_fmp_get(url, params=None, timeout=30, **_kw):
+    client = _ACTIVE.get("client")
+    assert client is not None, "transport used before _make_client()"
+    resp = client.session.get(url, params=params, timeout=timeout)
+    if resp is None or getattr(resp, "status_code", 200) != 200:
+        return None
+    return resp.json()
+
+
+def _wire_fake_transport(client):
+    """Register the client and patch fmp_get in its module's namespace.
+
+    Patching `type(client)._rate_limited_get.__globals__` targets the exact
+    namespace the method resolves `fmp_get` against, which stays correct even
+    when conftest evicts and re-imports `fmp_client` between skill suites.
+    """
+    _ACTIVE["client"] = client
+    globs = type(client)._rate_limited_get.__globals__
+    if globs.get("fmp_get") is not _fake_fmp_get:
+        _ACTIVE.setdefault("patched", []).append((globs, globs["fmp_get"]))
+        globs["fmp_get"] = _fake_fmp_get
+
+
+@pytest.fixture(autouse=True)
+def _restore_transport():
+    yield
+    for globs, orig in _ACTIVE.get("patched", []):
+        globs["fmp_get"] = orig
+    _ACTIVE.clear()
 
 
 def _make_client():
     client = FMPClient(api_key="test_key")
     client.max_retries = 0
+    _wire_fake_transport(client)
     return client
 
 

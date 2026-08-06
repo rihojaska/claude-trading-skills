@@ -26,11 +26,11 @@ FAMILY_B = [
 FAMILY_A = [
     "skills/vcp-screener/scripts/fmp_client.py",
     "skills/parabolic-short-trade-planner/scripts/fmp_client.py",
-    "skills/ftd-detector/scripts/fmp_client.py",
 ]
 
 SPECIALS = [
     "skills/canslim-screener/scripts/fmp_client.py",
+    "skills/ftd-detector/scripts/fmp_client.py",
     "skills/macro-regime-detector/scripts/fmp_client.py",
     "skills/market-top-detector/scripts/fmp_client.py",
 ]
@@ -135,6 +135,7 @@ def test_macro_special_surface_and_stats(monkeypatch):
     monkeypatch.setenv("FMP_API_KEY", "test_key")  # pragma: allowlist secret
     mod = _load("skills/macro-regime-detector/scripts/fmp_client.py")
     assert hasattr(mod, "_has_usable_history")
+    assert hasattr(mod, "fmp_get")  # fmp_compat transport
     for method in (
         "get_historical_prices",
         "_get_from_yfinance",
@@ -148,18 +149,20 @@ def test_macro_special_surface_and_stats(monkeypatch):
         "cache_entries",
         "api_calls_made",
         "rate_limit_reached",
+        "data_sources",
     }
 
 
 def test_market_top_special_surface_and_stats(monkeypatch):
     monkeypatch.setenv("FMP_API_KEY", "test_key")  # pragma: allowlist secret
     mod = _load("skills/market-top-detector/scripts/fmp_client.py")
-    assert hasattr(mod, "_has_usable_history")
+    assert hasattr(mod, "fmp_get")  # fmp_compat transport
+    # yfinance fallback is module-level (_yf_quote/_yf_history), not methods.
+    assert hasattr(mod, "_yf_quote")
+    assert hasattr(mod, "_yf_history")
     for method in (
         "get_quote",
-        "_get_quote_from_yfinance",
         "get_historical_prices",
-        "_get_hist_from_yfinance",
         "get_batch_quotes",
         "get_batch_historical",
         "calculate_ema",
@@ -173,6 +176,33 @@ def test_market_top_special_surface_and_stats(monkeypatch):
         "cache_entries",
         "api_calls_made",
         "rate_limit_reached",
+        "data_sources",
+    }
+
+
+def test_ftd_special_surface_and_stats(monkeypatch):
+    monkeypatch.setenv("FMP_API_KEY", "test_key")  # pragma: allowlist secret
+    mod = _load("skills/ftd-detector/scripts/fmp_client.py")
+    assert hasattr(mod, "fmp_get")  # fmp_compat transport
+    assert hasattr(mod, "_yf_quote")
+    assert hasattr(mod, "_yf_history")
+    assert not hasattr(mod, "ApiCallBudgetExceeded")
+    for method in (
+        "get_quote",
+        "get_historical_prices",
+        "get_batch_quotes",
+        "get_batch_historical",
+        "calculate_sma",
+        "calculate_ema",
+        "get_api_stats",
+    ):
+        assert hasattr(mod.FMPClient, method)
+    client = mod.FMPClient(api_key="test_key")  # pragma: allowlist secret
+    assert set(client.get_api_stats()) == {
+        "cache_entries",
+        "api_calls_made",
+        "rate_limit_reached",
+        "data_sources",
     }
 
 

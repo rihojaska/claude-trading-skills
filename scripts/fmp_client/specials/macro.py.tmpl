@@ -17,6 +17,7 @@ import os
 import sys
 import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -24,6 +25,62 @@ try:
 except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
+
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+from fmp_compat import fmp_get
+
+# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+
+
+def _yf_history(symbol: str, days: int) -> Optional[dict]:
+    """Fetch daily history via yfinance and normalize to FMP historical shape.
+
+    Returns ``{"symbol": ..., "historical": [...]}`` with most-recent-first
+    bars (date/open/high/low/close/adjClose/volume), or ``None`` on
+    empty/error. ``yfinance`` is imported lazily so the FMP success path never
+    depends on it.
+    """
+    try:
+        import yfinance as yf
+
+        end = date.today()
+        start = end - timedelta(days=int(days * 1.5))  # cover weekends/holidays
+        df = yf.download(
+            symbol,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            auto_adjust=True,
+            progress=False,
+        )
+        if df is None or df.empty:
+            return None
+        # yfinance returns MultiIndex columns for a single ticker.
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.droplevel(1)
+        historical = []
+        for idx, row in df.iterrows():
+            close = float(row["Close"])
+            historical.append(
+                {
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": close,
+                    "adjClose": close,  # auto_adjust=True -> Close already adjusted
+                    "volume": int(row["Volume"]),
+                }
+            )
+        if not historical:
+            return None
+        historical.reverse()  # yfinance ascending -> FMP most-recent-first
+        return {"symbol": symbol, "historical": historical[:days], "data_source": "yfinance"}
+    except Exception as e:
+        print(f"WARNING: yfinance history fallback failed for {symbol}: {e}", file=sys.stderr)
+        return None
 
 
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
@@ -139,6 +196,7 @@ class FMPClient:
         self.api_calls_made = 0
         self._endpoint_failures: dict[str, int] = {}
         self._disabled_endpoints: set[str] = set()
+        self.data_sources: dict[str, str] = {}
 
     def _rate_limited_get(
         self, url: str, params: Optional[dict] = None, quiet: bool = False
@@ -153,39 +211,12 @@ class FMPClient:
         if elapsed < self.RATE_LIMIT_DELAY:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            self.last_call_time = time.time()
-            self.api_calls_made += 1
-
-            if response.status_code == 200:
-                self.retry_count = 0
-                return response.json()
-            elif response.status_code == 429:
-                self.retry_count += 1
-                if self.retry_count <= self.max_retries:
-                    if not quiet:
-                        print(
-                            "WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr
-                        )
-                    time.sleep(60)
-                    return self._rate_limited_get(url, params, quiet=quiet)
-                else:
-                    if not quiet:
-                        print("ERROR: Daily API rate limit reached.", file=sys.stderr)
-                    self.rate_limit_reached = True
-                    return None
-            else:
-                if not quiet:
-                    print(
-                        f"ERROR: API request failed: {response.status_code} - {response.text[:200]}",
-                        file=sys.stderr,
-                    )
-                return None
-        except requests.exceptions.RequestException as e:
-            if not quiet:
-                print(f"ERROR: Request exception: {e}", file=sys.stderr)
-            return None
+        data = fmp_get(url, params=params, timeout=30, max_retries_per_key=1)
+        self.last_call_time = time.time()
+        self.api_calls_made += 1
+        if data is None and not quiet:
+            print(f"ERROR: FMP request failed or quota-limited: {url}", file=sys.stderr)
+        return data
 
     def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
         """Try stable endpoint first, fall back to v3 for legacy users."""
@@ -264,15 +295,18 @@ class FMPClient:
             return self.cache[cache_key]
 
         data = self._request_with_fallback("historical", symbol, {"timeseries": days})
-        # _request_with_fallback can return a truthy dict with an EMPTY
-        # historical list (v3 `{"symbol":...,"historical":[]}` or an empty
-        # historicalStockList entry) for ETFs unavailable on the caller's FMP
-        # plan. A bare `if not data` check would miss that and cache the empty
-        # result, defeating the fallback's purpose — so treat "no usable
-        # history" the same as "no data".
         if not _has_usable_history(data):
-            data = self._get_from_yfinance(symbol, days)
-        if _has_usable_history(data):
+            # FMP can return a truthy dict with an EMPTY `historical` list for
+            # ETFs/indexes unavailable on the caller's plan — treat as a miss.
+            data = _yf_history(symbol, days)
+            if _has_usable_history(data):
+                self.data_sources[f"historical:{symbol}"] = "yfinance"
+            else:
+                return None  # nothing usable — do not cache the empty result
+        else:
+            data["data_source"] = data.get("data_source", "fmp")
+            self.data_sources[f"historical:{symbol}"] = data["data_source"]
+        if data:
             self.cache[cache_key] = data
             return data
         return None
@@ -366,4 +400,5 @@ class FMPClient:
             "cache_entries": len(self.cache),
             "api_calls_made": self.api_calls_made,
             "rate_limit_reached": self.rate_limit_reached,
+            "data_sources": self.data_sources,
         }

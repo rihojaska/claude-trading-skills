@@ -156,29 +156,48 @@ def test_special_templates_preserve_public_surface(gen):
     macro = gen.render_fmp_client(skills["macro-regime-detector"])
     for needle in (
         "def _has_usable_history(data) -> bool:",
+        "from fmp_compat import fmp_get",
         "def get_historical_prices(self, symbol: str, days: int = 600)",
         "def _get_from_yfinance(self, symbol: str, days: int)",
         "def get_batch_historical(self, symbols: list[str], days: int = 600)",
         "def get_treasury_rates(self, days: int = 600)",
         '"api_calls_made": self.api_calls_made',
+        '"data_sources": self.data_sources',
     ):
         assert needle in macro
 
     market_top = gen.render_fmp_client(skills["market-top-detector"])
     for needle in (
-        "def _has_usable_history(data) -> bool:",
+        "from fmp_compat import fmp_get, get_fmp_keys",
         "def get_quote(self, symbols: str)",
-        "def _get_quote_from_yfinance(self, symbol: str)",
+        "def _yf_quote(symbol: str)",
         "def get_historical_prices(self, symbol: str, days: int = 365)",
-        "def _get_hist_from_yfinance(self, symbol: str, days: int)",
+        "def _yf_history(symbol: str, days: int)",
         "def get_batch_quotes(self, symbols: list[str])",
         "def get_batch_historical(self, symbols: list[str], days: int = 50)",
         "def calculate_ema(self, prices: list[float], period: int)",
         "def calculate_sma(self, prices: list[float], period: int)",
         "def get_vix_term_structure(self)",
         '"api_calls_made": self.api_calls_made',
+        '"data_sources": self.data_sources',
     ):
         assert needle in market_top
+
+    ftd = gen.render_fmp_client(skills["ftd-detector"])
+    for needle in (
+        "from fmp_compat import fmp_get, get_fmp_keys",
+        "def get_quote(self, symbols: str)",
+        "def _yf_quote(symbol: str)",
+        "def get_historical_prices(self, symbol: str, days: int = 365)",
+        "def _yf_history(symbol: str, days: int)",
+        "def get_batch_quotes(self, symbols: list[str])",
+        "def get_batch_historical(self, symbols: list[str], days: int = 50)",
+        "def calculate_sma(self, prices: list[float], period: int)",
+        "def calculate_ema(self, prices: list[float], period: int)",
+        '"data_sources": self.data_sources',
+    ):
+        assert needle in ftd
+    assert "ApiCallBudgetExceeded" not in ftd
 
 
 def test_check_passes_against_committed(gen):

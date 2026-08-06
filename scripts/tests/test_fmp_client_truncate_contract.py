@@ -76,7 +76,18 @@ def test_get_historical_prices_truncates_to_days(client_path, monkeypatch):
     module = _load_fmp_module(client_path)
 
     mock_response = _build_mock_response(5)
-    with patch.object(module.requests.Session, "get", return_value=mock_response):
+    # ftd/macro/market-top transport via module-level fmp_compat.fmp_get
+    # (returns parsed JSON); the template-family clients use requests.Session.
+    if hasattr(module, "fmp_get"):
+        monkeypatch.setattr(module, "fmp_get", lambda url, params=None, **_kw: mock_response.json())
+        transport_patch = patch.object(
+            module.requests.Session,
+            "get",
+            side_effect=AssertionError("fmp_get client must not use session transport"),
+        )
+    else:
+        transport_patch = patch.object(module.requests.Session, "get", return_value=mock_response)
+    with transport_patch:
         client = module.FMPClient(api_key="test_key")
         # Disable retries to keep the test fast.
         if hasattr(client, "max_retries"):

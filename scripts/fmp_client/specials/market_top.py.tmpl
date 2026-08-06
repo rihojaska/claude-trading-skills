@@ -16,6 +16,7 @@ import os
 import sys
 import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -24,6 +25,11 @@ except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+from fmp_compat import fmp_get, get_fmp_keys
 
 # --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
 
@@ -116,16 +122,85 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
     return {"symbol": matched_symbol or symbols_str, "historical": historical}
 
 
-def _has_usable_history(data) -> bool:
-    """True only when `data` is a dict carrying a non-empty `historical` list.
+def _yf_history(symbol: str, days: int) -> Optional[dict]:
+    """Fetch daily history via yfinance and normalize to FMP historical shape.
 
-    A dict with an empty `historical` list (e.g. an index/ETF unavailable on the
-    caller's FMP plan) is treated as unusable so the caller can fall back to
-    yfinance instead of caching an empty result.
+    Returns ``{"symbol": ..., "historical": [...]}`` with most-recent-first
+    bars (date/open/high/low/close/adjClose/volume), or ``None`` on
+    empty/error. ``yfinance`` is imported lazily so the FMP success path never
+    depends on it.
     """
-    return bool(
-        isinstance(data, dict) and isinstance(data.get("historical"), list) and data["historical"]
-    )
+    try:
+        import yfinance as yf
+
+        end = date.today()
+        start = end - timedelta(days=int(days * 1.5))  # cover weekends/holidays
+        df = yf.download(
+            symbol,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            auto_adjust=True,
+            progress=False,
+        )
+        if df is None or df.empty:
+            return None
+        # yfinance returns MultiIndex columns for a single ticker.
+        if hasattr(df.columns, "levels"):
+            df.columns = df.columns.droplevel(1)
+        historical = []
+        for idx, row in df.iterrows():
+            close = float(row["Close"])
+            historical.append(
+                {
+                    "date": idx.strftime("%Y-%m-%d"),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": close,
+                    "adjClose": close,  # auto_adjust=True -> Close already adjusted
+                    "volume": int(row["Volume"]),
+                }
+            )
+        if not historical:
+            return None
+        historical.reverse()  # yfinance ascending -> FMP most-recent-first
+        return {"symbol": symbol, "historical": historical[:days], "data_source": "yfinance"}
+    except Exception as e:
+        print(f"WARNING: yfinance history fallback failed for {symbol}: {e}", file=sys.stderr)
+        return None
+
+
+def _yf_quote(symbol: str) -> Optional[dict]:
+    """Quote-like record derived from recent yfinance daily bars (FMP quote shape).
+
+    Year high/low are approximated from ~252 daily bars.
+    """
+    hist = _yf_history(symbol, 260)
+    if not hist or not hist.get("historical"):
+        return None
+    bars = hist["historical"]  # most-recent-first
+    latest = bars[0]
+    prev_close = bars[1]["close"] if len(bars) > 1 else latest["close"]
+    price = latest["close"]
+    change = price - prev_close
+    pct = (change / prev_close * 100) if prev_close else 0.0
+    window = bars[:252]
+    year_high = max(b["high"] for b in window)
+    year_low = min(b["low"] for b in window)
+    return {
+        "symbol": symbol,
+        "price": price,
+        "previousClose": prev_close,
+        "change": change,
+        "changesPercentage": pct,
+        "open": latest["open"],
+        "high": latest["high"],
+        "low": latest["low"],
+        "volume": latest["volume"],
+        "yearHigh": year_high,
+        "yearLow": year_low,
+        "data_source": "yfinance",
+    }
 
 
 class FMPClient:
@@ -154,6 +229,7 @@ class FMPClient:
         # Circuit breaker: track consecutive failures per endpoint URL prefix
         self._endpoint_failures: dict[str, int] = {}
         self._disabled_endpoints: set[str] = set()
+        self.data_sources: dict[str, str] = {}
 
     def _rate_limited_get(
         self, url: str, params: Optional[dict] = None, quiet: bool = False
@@ -168,34 +244,18 @@ class FMPClient:
         if elapsed < self.RATE_LIMIT_DELAY:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-            self.last_call_time = time.time()
-            self.api_calls_made += 1
-
-            if response.status_code == 200:
-                self.retry_count = 0
-                return response.json()
-            elif response.status_code == 429:
-                self.retry_count += 1
-                if self.retry_count <= self.max_retries:
-                    print("WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr)
-                    time.sleep(60)
-                    return self._rate_limited_get(url, params, quiet=quiet)
-                else:
-                    print("ERROR: Daily API rate limit reached.", file=sys.stderr)
-                    self.rate_limit_reached = True
-                    return None
+        data = fmp_get(url, params=params, timeout=30, max_retries_per_key=1)
+        self.last_call_time = time.time()
+        self.api_calls_made += 1
+        if data is None and not quiet:
+            if not get_fmp_keys():
+                print(
+                    "ERROR: FMP keys not in environment — likely a source/export bug, not a quota issue",
+                    file=sys.stderr,
+                )
             else:
-                if not quiet:
-                    print(
-                        f"ERROR: API request failed: {response.status_code} - {response.text[:200]}",
-                        file=sys.stderr,
-                    )
-                return None
-        except requests.exceptions.RequestException as e:
-            print(f"ERROR: Request exception: {e}", file=sys.stderr)
-            return None
+                print(f"ERROR: FMP request failed or quota-limited: {url}", file=sys.stderr)
+        return data
 
     def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
         """Try stable endpoint first, fall back to v3 for legacy users.
@@ -291,49 +351,20 @@ class FMPClient:
             return self.cache[cache_key]
 
         data = self._request_with_fallback("quote", symbols)
-        if not data and "," not in symbols:
-            data = self._get_quote_from_yfinance(symbols)
+        if not data:
+            quotes = []
+            for symbol in symbols.split(","):
+                quote = _yf_quote(symbol)
+                if quote:
+                    quotes.append(quote)
+                    self.data_sources[f"quote:{symbol}"] = "yfinance"
+            data = quotes or None
+        else:
+            for symbol in symbols.split(","):
+                self.data_sources[f"quote:{symbol}"] = "fmp"
         if data:
             self.cache[cache_key] = data
         return data
-
-    def _get_quote_from_yfinance(self, symbol: str) -> Optional[list[dict]]:
-        """Fallback quote derived from recent yfinance daily bars.
-
-        Returns the FMP quote shape (a list with one dict carrying
-        price/previousClose/change/changesPercentage/open/high/low/volume/
-        yearHigh/yearLow), or ``None`` when history is unavailable. Year
-        high/low are approximated from ~252 daily bars.
-        """
-        hist = self._get_hist_from_yfinance(symbol, 260)
-        if not _has_usable_history(hist):
-            return None
-        bars = hist["historical"]  # most-recent-first
-        latest = bars[0]
-        prev_close = bars[1]["close"] if len(bars) > 1 else latest["close"]
-        price = latest["close"]
-        change = price - prev_close
-        pct = (change / prev_close * 100) if prev_close else 0.0
-        window = bars[:252]
-        year_high = max(b["high"] for b in window)
-        year_low = min(b["low"] for b in window)
-        return [
-            {
-                "symbol": symbol,
-                "price": price,
-                "previousClose": prev_close,
-                "change": round(change, 4),
-                "changesPercentage": round(pct, 4),
-                "open": latest["open"],
-                "dayHigh": latest["high"],
-                "dayLow": latest["low"],
-                "high": latest["high"],
-                "low": latest["low"],
-                "volume": latest["volume"],
-                "yearHigh": year_high,
-                "yearLow": year_low,
-            }
-        ]
 
     def get_historical_prices(self, symbol: str, days: int = 365) -> Optional[dict]:
         """Fetch historical daily OHLCV data.
@@ -347,59 +378,17 @@ class FMPClient:
             return self.cache[cache_key]
 
         data = self._request_with_fallback("historical", symbol, {"timeseries": days})
-        if not _has_usable_history(data):
-            data = self._get_hist_from_yfinance(symbol, days)
-        if _has_usable_history(data):
+        if not data:
+            data = _yf_history(symbol, days)
+            if data:
+                self.data_sources[f"historical:{symbol}"] = "yfinance"
+        else:
+            data["data_source"] = data.get("data_source", "fmp")
+            self.data_sources[f"historical:{symbol}"] = data["data_source"]
+        if data:
             self.cache[cache_key] = data
             return data
         return None
-
-    def _get_hist_from_yfinance(self, symbol: str, days: int) -> Optional[dict]:
-        """Fallback: fetch daily history via yfinance when FMP is unavailable.
-
-        Returns the FMP-compatible shape ``{"symbol": ..., "historical": [...]}``
-        with most-recent-first bars (date/open/high/low/close/adjClose/volume),
-        or ``None`` on empty/error. ``yfinance`` is imported lazily so the FMP
-        success path never depends on it.
-        """
-        try:
-            import yfinance as yf
-
-            end = date.today()
-            start = end - timedelta(days=int(days * 1.5))  # cover weekends/holidays
-            df = yf.download(
-                symbol,
-                start=start.isoformat(),
-                end=end.isoformat(),
-                auto_adjust=True,
-                progress=False,
-            )
-            if df is None or df.empty:
-                return None
-            # yfinance returns MultiIndex columns for a single ticker.
-            if hasattr(df.columns, "levels"):
-                df.columns = df.columns.droplevel(1)
-            historical = []
-            for idx, row in df.iterrows():
-                close = float(row["Close"])
-                historical.append(
-                    {
-                        "date": idx.strftime("%Y-%m-%d"),
-                        "open": float(row["Open"]),
-                        "high": float(row["High"]),
-                        "low": float(row["Low"]),
-                        "close": close,
-                        "adjClose": close,  # auto_adjust=True -> Close already adjusted
-                        "volume": int(row["Volume"]),
-                    }
-                )
-            if not historical:
-                return None
-            historical.reverse()  # yfinance ascending -> FMP most-recent-first
-            return {"symbol": symbol, "historical": historical[:days]}
-        except Exception as e:
-            print(f"WARNING: yfinance history fallback failed for {symbol}: {e}", file=sys.stderr)
-            return None
 
     def get_batch_quotes(self, symbols: list[str]) -> dict[str, dict]:
         """Fetch quotes for a list of symbols.
@@ -483,4 +472,5 @@ class FMPClient:
             "cache_entries": len(self.cache),
             "api_calls_made": self.api_calls_made,
             "rate_limit_reached": self.rate_limit_reached,
+            "data_sources": self.data_sources,
         }
