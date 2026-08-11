@@ -60,10 +60,11 @@ def extract_breadth_score(data: Optional[dict]) -> Optional[int]:
     if "composite_score" in data:
         return int(data["composite_score"])
     # market-breadth-analyzer nests its 0-100 health score under "composite"
-    # (100 = healthy). High = bullish, so used directly (no inversion).
+    # (100 = healthy). High = bullish, so used directly (no inversion);
+    # MD-1 int(round()).
     composite = data.get("composite")
     if isinstance(composite, dict) and "composite_score" in composite:
-        return int(composite["composite_score"])
+        return int(round(composite["composite_score"]))
     if "ad_ratio" in data and "nh_nl_ratio" in data:
         ad = data["ad_ratio"]
         nh_nl = data["nh_nl_ratio"]
@@ -105,7 +106,8 @@ def extract_uptrend_score(data: Optional[dict]) -> Optional[int]:
     composite = data.get("composite")
     if isinstance(composite, dict):
         if "composite_score" in composite:
-            return int(composite["composite_score"])
+            # MD-1 contract: int(round()), not truncation (57.7 -> 58)
+            return int(round(composite["composite_score"]))
         if "uptrend_pct" in composite:
             return _uptrend_pct_to_score(composite["uptrend_pct"])
     if "uptrend_pct" in data:
@@ -164,11 +166,13 @@ def extract_top_risk_score(data: Optional[dict]) -> Optional[int]:
     if "top_risk_score" in data:
         return int(data["top_risk_score"])
     # market-top-detector nests its 0-100 score under "composite", where HIGH =
-    # higher top risk (>80 = Critical/Top Formation). Invert to the
-    # exposure-friendly convention (high = safe to be exposed).
+    # higher top risk (>80 = Critical/Top Formation; verified 2026-08-11 against
+    # the live sidecar: 32.6 -> "Yellow (Early Warning)", FTD logic reads
+    # "composite < 40 = Green/Yellow"). Invert exactly once to the
+    # exposure-friendly convention (high = safe to be exposed); MD-1 int(round()).
     composite = data.get("composite")
     if isinstance(composite, dict) and "composite_score" in composite:
-        return max(0, min(100, int(100 - composite["composite_score"])))
+        return max(0, min(100, int(round(100 - composite["composite_score"]))))
     if "top_probability" in data:
         prob = data["top_probability"]
         # Invert: high probability = low score
