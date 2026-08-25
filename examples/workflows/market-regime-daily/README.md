@@ -96,6 +96,7 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
   --breadth  examples/workflows/market-regime-daily/sample-run-full-path/01_market_breadth_report_raw.json \
   --uptrend  examples/workflows/market-regime-daily/sample-run-full-path/02_uptrend_report_raw.json \
   --top-risk examples/workflows/market-regime-daily/sample-run-full-path/03_top_risk_report_raw.json \
+  --as-of 2026-01-15 \
   --output-dir /tmp/verify_full_path/
 
 # Then check the deterministic key fields:

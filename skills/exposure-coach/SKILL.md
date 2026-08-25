@@ -60,7 +60,7 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
 
 The script accepts partial inputs; missing files reduce confidence but do not block execution.
 
-**Freshness contract:** Each input is aged against its own internal date (`generated_at` / `as_of` / `data_date`, top level or under `metadata`). An input older than its `INPUT_MAX_AGE_DAYS` bound — or carrying no date at all — is stale: it is excluded from the composite exactly like a missing input, the remaining weights are renormalized, and it is listed in `inputs_stale` (`age_days: null` means undated). Any stale input caps confidence at MEDIUM; a stale critical input (`regime`, `top_risk`, `breadth`) caps it at LOW and sets `ceiling_decision_eligible: false` — the ceiling is still rendered, but as advisory context rather than a decision input.
+**Freshness contract:** Each input is aged against its own internal date — actual DATA dates first (`data_date` / `as_of` / `metadata.latest_data_date` / `metadata.data_freshness.latest_date`), with `generated_at` only as a last resort, so a report regenerated from old market data cannot read fresh. An input older than its `INPUT_MAX_AGE_DAYS` bound — or carrying no date at all — is stale: it is excluded from the composite exactly like a missing input, the remaining weights are renormalized, and it is listed in `inputs_stale` (`age_days: null` means undated). Any stale input caps confidence at MEDIUM; a stale critical input (`regime`, `top_risk`, `breadth`) caps it at LOW and sets `ceiling_decision_eligible: false` — the ceiling is still rendered, but as advisory context rather than a decision input.
 
 **Verification pitfall:** After each run, inspect the generated JSON fields `inputs_provided`, `inputs_missing`, and `inputs_stale` (a supplied input that was aged out appears in none of the first two). If a file you passed on the CLI still appears in `inputs_missing` (for example a theme-detector JSON that the exposure engine did not recognize), report the affected dimension as degraded and keep confidence capped; do not assume the supplied input was incorporated just because the CLI argument was present.
 
@@ -98,7 +98,7 @@ Map the posture recommendation to portfolio actions:
   "bias": "GROWTH",
   "participation": "BROAD",
   "recommendation": "NEW_ENTRY_ALLOWED",
-  "confidence": "HIGH",
+  "confidence": "MEDIUM",
   "component_scores": {
     "breadth_score": 65,
     "uptrend_score": 72,

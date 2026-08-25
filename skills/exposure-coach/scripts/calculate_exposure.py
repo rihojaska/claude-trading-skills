@@ -84,7 +84,13 @@ def _parse_timestamp(value) -> Optional[datetime]:
 
 # Internal-date keys, in precedence order: when the producer stamps run time it
 # wins over the data date. Checked at the top level, then inside `metadata`.
-_DATE_KEYS = ("generated_at", "as_of", "as_of_date", "data_date", "date")
+# Actual DATA dates outrank report-generation times: a report regenerated
+# from old market data carries a fresh generated_at alongside a stale
+# latest_date, and preferring generated_at would launder that staleness
+# (codex gate P1, 2026-08-25). generated_at is the LAST resort.
+_DATA_DATE_KEYS = ("data_date", "as_of", "as_of_date", "date")
+_GENERATED_KEYS = ("generated_at",)
+_DATE_KEYS = _DATA_DATE_KEYS + _GENERATED_KEYS  # legacy alias (tests import it)
 
 
 def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
@@ -95,21 +101,27 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     """
     if not isinstance(data, dict):
         return None
-    for key in _DATE_KEYS:
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    freshness = (metadata.get("data_freshness")
+                 if isinstance(metadata.get("data_freshness"), dict) else {})
+    # Pass 1 — actual data dates (top-level, then metadata).
+    for key in _DATA_DATE_KEYS:
         parsed = _parse_timestamp(data.get(key))
         if parsed is not None:
             return parsed
-    metadata = data.get("metadata")
-    if isinstance(metadata, dict):
-        for key in _DATE_KEYS + ("latest_data_date",):
-            parsed = _parse_timestamp(metadata.get(key))
-            if parsed is not None:
-                return parsed
-        freshness = metadata.get("data_freshness")
-        if isinstance(freshness, dict):
-            parsed = _parse_timestamp(freshness.get("latest_date"))
-            if parsed is not None:
-                return parsed
+    for value in (metadata.get("latest_data_date"), freshness.get("latest_date")):
+        parsed = _parse_timestamp(value)
+        if parsed is not None:
+            return parsed
+    for key in _DATA_DATE_KEYS:
+        parsed = _parse_timestamp(metadata.get(key))
+        if parsed is not None:
+            return parsed
+    # Pass 2 — report-generation times, only when no data date exists.
+    for value in (data.get("generated_at"), metadata.get("generated_at")):
+        parsed = _parse_timestamp(value)
+        if parsed is not None:
+            return parsed
     return None
 
 
@@ -133,6 +145,10 @@ def assess_input_staleness(
     if internal is None:
         return True, None
     age_days = (now - internal).total_seconds() / 86400.0
+    if age_days < -2:
+        # A materially future-dated input is corrupt evidence, not fresh
+        # evidence — beyond ~2d of clock skew it fails closed (codex gate P2).
+        return True, age_days
     if path is not None:
         try:
             mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
@@ -703,6 +719,11 @@ def main():
         "--institutional", type=Path, help="Path to institutional-flow-tracker JSON"
     )
     parser.add_argument(
+        "--as-of",
+        help="Pin the freshness-evaluation clock (ISO date/datetime, assumed "
+             "UTC) — required for deterministic historical replays; default: now",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("reports"),
@@ -711,6 +732,15 @@ def main():
     parser.add_argument("--json-only", action="store_true", help="Output JSON only, skip markdown")
 
     args = parser.parse_args()
+    if args.as_of:
+        ts = args.as_of
+        if ts.endswith("Z"):
+            ts = ts[:-1] + "+00:00"
+        args_now = datetime.fromisoformat(ts)
+        if args_now.tzinfo is None:
+            args_now = args_now.replace(tzinfo=timezone.utc)
+    else:
+        args_now = datetime.now(timezone.utc)
 
     # Load all inputs
     breadth_data = load_json_file(args.breadth)
@@ -734,9 +764,13 @@ def main():
         "institutional": extract_institutional_score(institutional_data),
     }
 
-    # Age every input that produced a score. An input whose score did not
-    # extract is missing, not stale — the two buckets stay disjoint.
-    now = datetime.now(timezone.utc)
+    # Age every LOADED input — not only score-bearing ones: sector and
+    # institutional raw payloads reach determine_bias even when their score
+    # fails to extract, so a score-less-but-loaded input must still age out
+    # (codex gate P2). A never-loaded input stays missing, not stale; a
+    # loaded, score-less, aged-out input may appear in both buckets — that is
+    # honest (it is stale AND unusable for the composite).
+    now = args_now
     input_paths = {
         "breadth": (breadth_data, args.breadth),
         "uptrend": (uptrend_data, args.uptrend),
@@ -749,7 +783,7 @@ def main():
     }
     stale_ages: dict[str, Optional[float]] = {}
     for key, (data, path) in input_paths.items():
-        if scores.get(key) is None:
+        if data is None:
             continue
         is_stale, age_days = assess_input_staleness(key, data, path, now=now)
         if is_stale:
