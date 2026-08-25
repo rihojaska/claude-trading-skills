@@ -102,8 +102,9 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     if not isinstance(data, dict):
         return None
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    freshness = (metadata.get("data_freshness")
-                 if isinstance(metadata.get("data_freshness"), dict) else {})
+    freshness = (
+        metadata.get("data_freshness") if isinstance(metadata.get("data_freshness"), dict) else {}
+    )
     # Pass 1 — actual data dates (top-level, then metadata). A RECOGNIZED
     # data-date key holding an unusable value (the uptrend producer emits
     # latest_data_date: "N/A" when no latest row exists) is INVALID EVIDENCE,
@@ -113,8 +114,9 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     candidates = [data.get(k) for k in _DATA_DATE_KEYS]
     candidates += [metadata.get("latest_data_date"), freshness.get("latest_date")]
     candidates += [metadata.get(k) for k in _DATA_DATE_KEYS]
-    # market-top shape: metadata.data_freshness.<component>.date — the OLDEST
-    # component date governs (weakest link, fail-closed).
+    # Per-component shapes: market-top stores metadata.data_freshness.
+    # <component>.date; macro-regime stores components.<name>.current_date.
+    # The OLDEST component date governs (weakest link, fail-closed).
     component_dates = []
     for v in freshness.values():
         if isinstance(v, dict):
@@ -123,16 +125,28 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
                 component_dates.append(cd)
             elif v.get("date") not in (None, ""):
                 invalid_evidence = True
+    components = data.get("components") if isinstance(data.get("components"), dict) else {}
+    for v in components.values():
+        if isinstance(v, dict):
+            cd = _parse_timestamp(v.get("current_date"))
+            if cd is not None:
+                component_dates.append(cd)
+            elif v.get("current_date") not in (None, ""):
+                invalid_evidence = True
     for value in candidates:
         parsed = _parse_timestamp(value)
         if parsed is not None:
             return parsed
         if value not in (None, ""):
             invalid_evidence = True
-    if component_dates:
-        return min(component_dates)
+    # invalid_evidence BEFORE the component return (codex r3 P1): a report
+    # mixing one valid and one malformed component date is corrupt evidence —
+    # market-top preserves malformed CLI date strings verbatim — and must
+    # fail closed rather than ride the surviving valid date.
     if invalid_evidence:
         return None
+    if component_dates:
+        return min(component_dates)
     # Pass 2 — report-generation times, only when NO data-date evidence of any
     # kind (valid or invalid) exists.
     for value in (data.get("generated_at"), metadata.get("generated_at")):
@@ -738,7 +752,7 @@ def main():
     parser.add_argument(
         "--as-of",
         help="Pin the freshness-evaluation clock (ISO date/datetime, assumed "
-             "UTC) — required for deterministic historical replays; default: now",
+        "UTC) — required for deterministic historical replays; default: now",
     )
     parser.add_argument(
         "--output-dir",

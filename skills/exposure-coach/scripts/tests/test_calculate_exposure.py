@@ -967,24 +967,26 @@ class TestInvalidDateEvidence:
     closed instead of laundering through a fresh generated_at."""
 
     def test_na_latest_data_date_does_not_fall_back_to_generated_at(self):
-        d = {"metadata": {"latest_data_date": "N/A",
-                          "generated_at": "2026-08-25 07:00:00"}}
+        d = {"metadata": {"latest_data_date": "N/A", "generated_at": "2026-08-25 07:00:00"}}
         assert calculate_exposure.extract_input_date(d) is None
 
     def test_na_latest_data_date_is_stale(self):
-        from datetime import datetime, timezone
-        d = {"metadata": {"latest_data_date": "N/A",
-                          "generated_at": "2026-08-25 07:00:00"}}
+        d = {"metadata": {"latest_data_date": "N/A", "generated_at": "2026-08-25 07:00:00"}}
         stale, age = calculate_exposure.assess_input_staleness(
-            "uptrend", d, now=datetime(2026, 8, 25, 8, tzinfo=timezone.utc))
+            "uptrend", d, now=datetime(2026, 8, 25, 8, tzinfo=timezone.utc)
+        )
         assert stale is True and age is None
 
     def test_market_top_per_component_dates_oldest_governs(self):
-        from datetime import datetime, timezone
-        d = {"metadata": {"generated_at": "2026-08-25 07:00:00",
-                          "data_freshness": {
-                              "vix": {"date": "2026-08-24"},
-                              "margin_debt": {"date": "2026-05-01"}}}}
+        d = {
+            "metadata": {
+                "generated_at": "2026-08-25 07:00:00",
+                "data_freshness": {
+                    "vix": {"date": "2026-08-24"},
+                    "margin_debt": {"date": "2026-05-01"},
+                },
+            }
+        }
         parsed = calculate_exposure.extract_input_date(d)
         assert parsed is not None and parsed.date().isoformat() == "2026-05-01"
 

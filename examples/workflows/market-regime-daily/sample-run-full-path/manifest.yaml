@@ -37,8 +37,11 @@ artifacts:
 #   python3 skills/exposure-coach/scripts/calculate_exposure.py \
 #     --breadth  sample-run-full-path/01_market_breadth_report_raw.json \
 #     --uptrend  sample-run-full-path/02_uptrend_report_raw.json \
-#     --top-risk sample-run-full-path/03_top_risk_report_raw.json
-# produces a posture matching the deterministic key fields below. The point
+#     --top-risk sample-run-full-path/03_top_risk_report_raw.json \
+#     --as-of 2026-01-15
+# produces a posture matching the deterministic key fields below. (--as-of
+# pins the freshness clock to the fixtures' date — without it the January
+# inputs age out and the replay drops them.) The point
 # of this full-path sample (vs the required-only sample-run/) is to prove
 # that the nested-only shapes are correctly consumed:
 #   extract_breadth_score(01)  reads composite.composite_score == 66
