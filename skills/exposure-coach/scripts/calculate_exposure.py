@@ -104,20 +104,37 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     freshness = (metadata.get("data_freshness")
                  if isinstance(metadata.get("data_freshness"), dict) else {})
-    # Pass 1 — actual data dates (top-level, then metadata).
-    for key in _DATA_DATE_KEYS:
-        parsed = _parse_timestamp(data.get(key))
-        if parsed is not None:
-            return parsed
-    for value in (metadata.get("latest_data_date"), freshness.get("latest_date")):
+    # Pass 1 — actual data dates (top-level, then metadata). A RECOGNIZED
+    # data-date key holding an unusable value (the uptrend producer emits
+    # latest_data_date: "N/A" when no latest row exists) is INVALID EVIDENCE,
+    # not absent evidence — it must fail closed instead of laundering through
+    # a fresh generated_at (codex gate r2 P1).
+    invalid_evidence = False
+    candidates = [data.get(k) for k in _DATA_DATE_KEYS]
+    candidates += [metadata.get("latest_data_date"), freshness.get("latest_date")]
+    candidates += [metadata.get(k) for k in _DATA_DATE_KEYS]
+    # market-top shape: metadata.data_freshness.<component>.date — the OLDEST
+    # component date governs (weakest link, fail-closed).
+    component_dates = []
+    for v in freshness.values():
+        if isinstance(v, dict):
+            cd = _parse_timestamp(v.get("date"))
+            if cd is not None:
+                component_dates.append(cd)
+            elif v.get("date") not in (None, ""):
+                invalid_evidence = True
+    for value in candidates:
         parsed = _parse_timestamp(value)
         if parsed is not None:
             return parsed
-    for key in _DATA_DATE_KEYS:
-        parsed = _parse_timestamp(metadata.get(key))
-        if parsed is not None:
-            return parsed
-    # Pass 2 — report-generation times, only when no data date exists.
+        if value not in (None, ""):
+            invalid_evidence = True
+    if component_dates:
+        return min(component_dates)
+    if invalid_evidence:
+        return None
+    # Pass 2 — report-generation times, only when NO data-date evidence of any
+    # kind (valid or invalid) exists.
     for value in (data.get("generated_at"), metadata.get("generated_at")):
         parsed = _parse_timestamp(value)
         if parsed is not None:
@@ -736,7 +753,10 @@ def main():
         ts = args.as_of
         if ts.endswith("Z"):
             ts = ts[:-1] + "+00:00"
-        args_now = datetime.fromisoformat(ts)
+        try:
+            args_now = datetime.fromisoformat(ts)
+        except ValueError:
+            parser.error(f"--as-of: not an ISO date/datetime: {args.as_of!r}")
         if args_now.tzinfo is None:
             args_now = args_now.replace(tzinfo=timezone.utc)
     else:
