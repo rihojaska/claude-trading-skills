@@ -102,7 +102,7 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
 # Then check the deterministic key fields:
 python3 - <<'PY'
 import glob, json
-actual = json.load(open(sorted(glob.glob("/tmp/verify_full_path/exposure_posture_*.json"))[-1]))
+actual = json.load(open(sorted(glob.glob("/tmp/verify_full_path/exposure_replay_*.json"))[-1]))  # --as-of runs write replay-prefixed artifacts
 expected = json.load(open("examples/workflows/market-regime-daily/sample-run-full-path/04_exposure_decision.json"))
 for key in ("composite_score", "exposure_ceiling_pct", "recommendation", "confidence", "bias", "participation", "component_scores", "inputs_provided", "inputs_missing"):
     assert actual[key] == expected[key], f"{key}: {actual[key]!r} != {expected[key]!r}"

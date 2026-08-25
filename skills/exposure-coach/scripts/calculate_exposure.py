@@ -89,6 +89,9 @@ def _parse_timestamp(value) -> Optional[datetime]:
 # latest_date, and preferring generated_at would launder that staleness
 # (codex gate P1, 2026-08-25). generated_at is the LAST resort.
 _DATA_DATE_KEYS = ("data_date", "as_of", "as_of_date", "date")
+# Components whose producer documents a structural lag (market-top's
+# margin-debt is 1-2 months behind per its SKILL.md) — see extract_input_date.
+_LAGGED_COMPONENTS = frozenset({"margin_debt"})
 _GENERATED_KEYS = ("generated_at",)
 _DATE_KEYS = _DATA_DATE_KEYS + _GENERATED_KEYS  # legacy alias (tests import it)
 
@@ -116,21 +119,27 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     candidates += [metadata.get(k) for k in _DATA_DATE_KEYS]
     # Per-component shapes: market-top stores metadata.data_freshness.
     # <component>.date; macro-regime stores components.<name>.current_date.
-    # The OLDEST component date governs (weakest link, fail-closed).
+    # The OLDEST non-lagged component date governs (weakest link,
+    # fail-closed); components whose producer documents a structural lag
+    # (_LAGGED_COMPONENTS) are excluded from that min so a by-design-lagged
+    # margin-debt cannot falsely stale an otherwise-current report
+    # (codex-gate r5 P2). When ONLY lagged components carry dates, the
+    # newest of them governs.
     component_dates = []
-    for v in freshness.values():
+    lagged_dates = []
+    for name, v in freshness.items():
         if isinstance(v, dict):
             cd = _parse_timestamp(v.get("date"))
             if cd is not None:
-                component_dates.append(cd)
+                (lagged_dates if name in _LAGGED_COMPONENTS else component_dates).append(cd)
             elif v.get("date") not in (None, ""):
                 invalid_evidence = True
     components = data.get("components") if isinstance(data.get("components"), dict) else {}
-    for v in components.values():
+    for name, v in components.items():
         if isinstance(v, dict):
             cd = _parse_timestamp(v.get("current_date"))
             if cd is not None:
-                component_dates.append(cd)
+                (lagged_dates if name in _LAGGED_COMPONENTS else component_dates).append(cd)
             elif v.get("current_date") not in (None, ""):
                 invalid_evidence = True
     for value in candidates:
@@ -147,6 +156,8 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
         return None
     if component_dates:
         return min(component_dates)
+    if lagged_dates:
+        return max(lagged_dates)
     # Pass 2 — report-generation times, only when NO data-date evidence of any
     # kind (valid or invalid) exists.
     for value in (data.get("generated_at"), metadata.get("generated_at")):
@@ -885,6 +896,7 @@ def main():
     result = {
         "schema_version": "1.0",
         "generated_at": now.isoformat(),
+        "freshness_as_of": freshness_now.isoformat(),
         "exposure_ceiling_pct": exposure_ceiling,
         "bias": bias,
         "participation": participation,
@@ -913,9 +925,18 @@ def main():
 
     # Generate timestamp for filenames
     timestamp = now.strftime("%Y-%m-%d_%H%M%S")
+    # A pinned-clock replay must never enter live-latest ordering: newest-
+    # file selectors glob exposure_posture_* and sort, so a wall-clock-named
+    # replay produced today would masquerade as the current decision
+    # (codex-gate r5 P1). Replays get a distinct prefix carrying the pinned
+    # date.
+    if args.as_of:
+        artifact_stem = "exposure_replay_" + freshness_now.strftime("%Y-%m-%d") + "_" + timestamp
+    else:
+        artifact_stem = f"exposure_posture_{timestamp}"
 
     # Write JSON
-    json_path = args.output_dir / f"exposure_posture_{timestamp}.json"
+    json_path = args.output_dir / f"{artifact_stem}.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
     print(f"JSON report: {json_path}")
@@ -923,7 +944,7 @@ def main():
     # Write markdown unless --json-only
     if not args.json_only:
         md_content = generate_markdown_report(result)
-        md_path = args.output_dir / f"exposure_posture_{timestamp}.md"
+        md_path = args.output_dir / f"{artifact_stem}.md"
         with open(md_path, "w", encoding="utf-8") as f:
             f.write(md_content)
         print(f"Markdown report: {md_path}")

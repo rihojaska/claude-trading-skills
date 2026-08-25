@@ -987,7 +987,7 @@ class TestInvalidDateEvidence:
                 "generated_at": "2026-08-25 07:00:00",
                 "data_freshness": {
                     "vix": {"date": "2026-08-24"},
-                    "margin_debt": {"date": "2026-05-01"},
+                    "breadth_divergence": {"date": "2026-05-01"},
                 },
             }
         }
@@ -1018,3 +1018,45 @@ class TestStaleCriticalRecommendationCap:
 
     def test_real_low_top_risk_still_cash_priority(self):
         assert determine_recommendation(89.0, 20, 0) == "CASH_PRIORITY"
+
+
+class TestLaggedComponentsAndReplayIdentity:
+    """Codex gate r5: documented-lagged components must not stale a current
+    report; replay artifacts must not enter live-latest ordering."""
+
+    def test_lagged_margin_debt_does_not_stale_current_report(self):
+        d = {
+            "metadata": {
+                "generated_at": _iso_days_ago(0),
+                "data_freshness": {
+                    "vix": {"date": _iso_days_ago(1)[:10]},
+                    "margin_debt": {"date": _iso_days_ago(45)[:10]},
+                },
+            }
+        }
+        stale, age = assess_input_staleness("top_risk", d)
+        assert stale is False, (stale, age)
+
+    def test_all_lagged_only_uses_newest(self):
+        d = {
+            "metadata": {
+                "data_freshness": {
+                    "margin_debt": {"date": _iso_days_ago(45)[:10]},
+                }
+            }
+        }
+        parsed = extract_input_date(d)
+        assert parsed is not None
+
+    def test_stale_daily_component_still_governs(self):
+        d = {
+            "metadata": {
+                "generated_at": _iso_days_ago(0),
+                "data_freshness": {
+                    "vix": {"date": _iso_days_ago(30)[:10]},
+                    "margin_debt": {"date": _iso_days_ago(45)[:10]},
+                },
+            }
+        }
+        stale, age = assess_input_staleness("top_risk", d)
+        assert stale is True
