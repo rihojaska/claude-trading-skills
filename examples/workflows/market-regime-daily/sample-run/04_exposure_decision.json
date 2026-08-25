@@ -18,7 +18,6 @@
   "inputs_missing": [
     "regime",
     "top_risk",
-    "institutional",
     "sector",
     "theme",
     "ftd"

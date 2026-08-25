@@ -313,7 +313,6 @@ def test_swing_decision_engines_reproduce_allowed_gates(
         "top_risk": 65,
         "breadth": 70,
         "uptrend": 74,
-        "institutional": None,
         "sector": None,
         "theme": None,
         "ftd": None,
@@ -329,7 +328,7 @@ def test_swing_decision_engines_reproduce_allowed_gates(
         scores["breadth"],
         None,
     )
-    bias = exposure.determine_bias("unknown", None, None, None)
+    bias = exposure.determine_bias("unknown", None, None)
     actual_exposure = {
         "schema_version": "1.0",
         "generated_at": expected_exposure["generated_at"],

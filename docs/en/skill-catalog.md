@@ -106,7 +106,7 @@ A comprehensive catalog of all 71 Claude Trading Skills organized by category. B
 | **[Futures Position Sizer]({{ '/en/skills/futures-position-sizer/' | relative_url }})** | Contract-based futures position sizing from direction/entry/stop using a verified 23-market contract-spec table (multiplier, tick size, tick value). Explicit flags or contrarian-setup-gate READY_FOR_PLAN handoff. Beta. Works offline | <span class="badge badge-free">No API</span> |
 | **[Breakout Trade Planner]({{ '/en/skills/breakout-trade-planner/' | relative_url }})** | Generates Minervini-style breakout trade plans from VCP screener output. Worst-case entry Gate, stop-limit bracket templates (pre_place / post_confirm), portfolio heat management | <span class="badge badge-free">No API</span> |
 | **[Parabolic Short Trade Planner]({{ '/en/skills/parabolic-short-trade-planner/' | relative_url }})** | Daily Parabolic Short screener (5-factor weighted score) plus pre-market plan generator that emits three conditional triggers per candidate (5-min ORL break, first red 5-min, VWAP fail). Alpaca ETB-only short check via `requests` (no SDK), SEC Rule 201 SSR tracker, blocking vs advisory manual confirmation reasons | <span class="badge badge-api">FMP Required</span> <span class="badge badge-optional">Alpaca Optional</span> |
-| **[Exposure Coach]({{ '/en/skills/exposure-coach/' | relative_url }})** | Synthesizes outputs from breadth, regime, top-risk, and flow skills into a one-page Market Posture summary with net exposure ceiling (0-100%), growth-vs-value bias, and NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY recommendation | <span class="badge badge-optional">FMP Optional</span> |
+| **[Exposure Coach]({{ '/en/skills/exposure-coach/' | relative_url }})** | Synthesizes outputs from breadth, regime, top-risk, and flow skills into a one-page Market Posture summary with net exposure ceiling (0-100%), growth-vs-value bias, and NEW_ENTRY_ALLOWED / REDUCE_ONLY / CASH_PRIORITY recommendation | <span class="badge badge-free">No API</span> |
 | **[US Stock Analysis]({{ '/en/skills/us-stock-analysis/' | relative_url }})** | Comprehensive US equity research: fundamentals, technicals, peer comparisons, and structured investment memos with bull/bear cases | <span class="badge badge-free">No API</span> |
 | **Earnings Calendar** | Fetches upcoming earnings announcements via FMP API. Focuses on mid-cap+ companies (>$2B market cap), organized by date and timing (BMO/AMC) | <span class="badge badge-api">FMP Required</span> |
 | **Economic Calendar Fetcher** | Fetches economic events (FOMC, NFP, CPI, GDP) for 7-90 days via FMP API. Impact assessment (High/Medium/Low) with market implications analysis | <span class="badge badge-api">FMP Required</span> |
@@ -260,7 +260,7 @@ A comprehensive catalog of all 71 Claude Trading Skills organized by category. B
 | Skill Idea Miner | -- | -- | -- |
 | Skill Integration Tester | -- | -- | -- |
 | Trade Hypothesis Ideator | -- | -- | -- |
-| Exposure Coach | Optional | -- | -- |
+| Exposure Coach | -- | -- | -- |
 | Signal Postmortem | Optional | -- | -- |
 | Downtrend Duration Analyzer | Required | -- | -- |
 | Breakout Trade Planner | -- | -- | -- |

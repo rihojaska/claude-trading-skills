@@ -17,4 +17,4 @@
 Broad participation indicates healthy market internals. Missing critical inputs (top_risk, regime) reduce confidence. New entries not recommended; consider trimming on strength.
 
 ### Missing Inputs
-regime, top_risk, institutional, sector, theme, ftd
+regime, top_risk, sector, theme, ftd

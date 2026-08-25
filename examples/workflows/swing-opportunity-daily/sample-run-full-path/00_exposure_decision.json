@@ -13,6 +13,6 @@
     "top_risk_score": 65
   },
   "inputs_provided": ["top_risk", "breadth", "uptrend"],
-  "inputs_missing": ["regime", "institutional", "sector", "theme", "ftd"],
+  "inputs_missing": ["regime", "sector", "theme", "ftd"],
   "rationale": "Broad participation indicates healthy market internals. Missing critical inputs (regime) reduce confidence. New positions allowed within the 59% ceiling."
 }

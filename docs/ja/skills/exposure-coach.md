@@ -12,10 +12,10 @@ generated: false
 # Exposure Coach
 {: .no_toc }
 
-市場ブレッドス、上昇参加率、マクロレジーム、トップリスク、テーマ、セクター、機関投資家フローを統合し、株式への許容エクスポージャー上限と新規リスク可否をまとめるスキルです。
+市場ブレッドス、上昇参加率、マクロレジーム、トップリスク、テーマ、セクターを統合し、株式への許容エクスポージャー上限と新規リスク可否をまとめるスキルです。
 {: .fs-6 .fw-300 }
 
-<span class="badge badge-optional">FMP任意</span>
+<span class="badge badge-free">API不要</span>
 
 [スキルパッケージをダウンロード (.skill)](https://github.com/tradermonty/claude-trading-skills/raw/main/skill-packages/exposure-coach.skill){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [GitHubでソースを見る](https://github.com/tradermonty/claude-trading-skills/tree/main/skills/exposure-coach){: .btn .fs-5 .mb-4 .mb-md-0 }
@@ -62,9 +62,8 @@ Exposure Coach は、個別銘柄を分析する前に「今、株式リスク�
 - `ftd-detector`
 - `theme-detector`
 - `sector-analyst`
-- `institutional-flow-tracker`
 
-一部の入力が欠けていても実行できます。ただし、欠けた入力が多いほど confidence は下がります。FMP は一部の上流スキルで必要になる場合があります。
+一部の入力が欠けていても実行できます。ただし、欠けた入力が多いほど confidence は下がります。Exposure Coach 自体は上流スキルの出力を統合する純粋な計算処理で、APIキーは不要です。
 
 ---
 
@@ -79,7 +78,6 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
   --ftd reports/ftd_latest.json \
   --theme reports/theme_latest.json \
   --sector reports/sector_latest.json \
-  --institutional reports/institutional_latest.json \
   --output-dir reports/
 ```
 

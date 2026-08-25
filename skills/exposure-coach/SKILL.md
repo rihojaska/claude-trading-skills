@@ -7,7 +7,7 @@ description: Generate a one-page Market Posture summary with net exposure ceilin
 
 ## Overview
 
-Exposure Coach synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, sector-analyst, and institutional-flow-tracker into a unified control-plane decision. The skill answers the solo trader's core question: "How much capital should I commit to equities right now?" before any individual stock analysis begins.
+Exposure Coach synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, and sector-analyst into a unified control-plane decision. The skill answers the solo trader's core question: "How much capital should I commit to equities right now?" before any individual stock analysis begins.
 
 ## When to Use
 
@@ -20,7 +20,7 @@ Exposure Coach synthesizes outputs from market-breadth-analyzer, uptrend-analyze
 ## Prerequisites
 
 - Python 3.9+
-- FMP API key (set `FMP_API_KEY` environment variable) for institutional-flow-tracker data
+- No API key required — pure calculation over upstream skill outputs
 - Input JSON files from upstream skills (see Workflow Step 1)
 - Standard library + `argparse`, `json`, `datetime`
 
@@ -39,7 +39,6 @@ Collect the most recent JSON outputs from integrated skills. Each file provides 
 | ftd-detector | `ftd_*.json` | Follow-Through Day quality (market bottom confirmation) |
 | theme-detector | `theme_detector_*.json` or `theme_*.json` | Active investment themes and rotation |
 | sector-analyst | `sector_*.json` | Sector performance rankings |
-| institutional-flow-tracker | `institutional_*.json` | Net institutional buying/selling |
 
 ### Step 2: Run Exposure Scoring Engine
 
@@ -54,11 +53,12 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
   --ftd reports/ftd_latest.json \
   --theme reports/theme_latest.json \
   --sector reports/sector_latest.json \
-  --institutional reports/institutional_latest.json \
   --output-dir reports/
 ```
 
 The script accepts partial inputs; missing files reduce confidence but do not block execution.
+
+**Deprecated flag:** `--institutional` is still accepted for CLI compatibility (institutional-flow-tracker was retired, WPP-20260825-006) but is fully ignored — passing it prints a stderr deprecation warning and has no effect on scoring, weights, or output.
 
 **Freshness contract:** Each input is aged against its own internal date — actual DATA dates first (`data_date` / `as_of` / `metadata.latest_data_date` / `metadata.data_freshness.latest_date`), with `generated_at` only as a last resort, so a report regenerated from old market data cannot read fresh. An input older than its `INPUT_MAX_AGE_DAYS` bound — or carrying no date at all — is stale: it is excluded from the composite exactly like a missing input, the remaining weights are renormalized, and it is listed in `inputs_stale` (`age_days: null` means undated). Any stale input caps confidence at MEDIUM; a stale critical input (`regime`, `top_risk`, `breadth`) caps it at LOW and sets `ceiling_decision_eligible: false` — the ceiling is still rendered, but as advisory context rather than a decision input.
 
@@ -106,7 +106,7 @@ Map the posture recommendation to portfolio actions:
     "top_risk_score": 25
   },
   "inputs_provided": ["breadth", "uptrend", "regime", "top_risk"],
-  "inputs_missing": ["ftd", "sector", "institutional"],
+  "inputs_missing": ["ftd", "sector"],
   "inputs_stale": [{"input": "theme", "age_days": null}],
   "ceiling_decision_eligible": true,
   "rationale": "Broad participation with low top risk supports elevated exposure."

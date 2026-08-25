@@ -14,7 +14,7 @@ permalink: /en/skills/exposure-coach/
 Generate a one-page Market Posture summary with net exposure ceiling, growth-vs-value bias, participation breadth, and new-entry-allowed vs cash-priority recommendation by integrating signals from breadth, regime, and flow analysis skills.
 {: .fs-6 .fw-300 }
 
-<span class="badge badge-optional">FMP Optional</span>
+<span class="badge badge-free">No API</span>
 
 [Download Skill Package (.skill)](https://github.com/tradermonty/claude-trading-skills/raw/main/skill-packages/exposure-coach.skill){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [View Source on GitHub](https://github.com/tradermonty/claude-trading-skills/tree/main/skills/exposure-coach){: .btn .fs-5 .mb-4 .mb-md-0 }
@@ -30,7 +30,7 @@ Generate a one-page Market Posture summary with net exposure ceiling, growth-vs-
 
 ## 1. Overview
 
-Exposure Coach synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, sector-analyst, and institutional-flow-tracker into a unified control-plane decision. The skill answers the solo trader's core question: "How much capital should I commit to equities right now?" before any individual stock analysis begins.
+Exposure Coach synthesizes outputs from market-breadth-analyzer, uptrend-analyzer, macro-regime-detector, market-top-detector, ftd-detector, theme-detector, and sector-analyst into a unified control-plane decision. The skill answers the solo trader's core question: "How much capital should I commit to equities right now?" before any individual stock analysis begins.
 
 ---
 
@@ -47,7 +47,7 @@ Exposure Coach synthesizes outputs from market-breadth-analyzer, uptrend-analyze
 ## 3. Prerequisites
 
 - Python 3.9+
-- FMP API key (set `FMP_API_KEY` environment variable) for institutional-flow-tracker data
+- No API key required — pure calculation over upstream skill outputs
 - Input JSON files from upstream skills (see Workflow Step 1)
 - Standard library + `argparse`, `json`, `datetime`
 
@@ -64,7 +64,6 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
   --ftd reports/ftd_latest.json \
   --theme reports/theme_latest.json \
   --sector reports/sector_latest.json \
-  --institutional reports/institutional_latest.json \
   --output-dir reports/
 ```
 
@@ -85,7 +84,6 @@ Collect the most recent JSON outputs from integrated skills. Each file provides 
 | ftd-detector | `ftd_*.json` | Failure-to-deliver anomalies |
 | theme-detector | `theme_*.json` | Active investment themes and rotation |
 | sector-analyst | `sector_*.json` | Sector performance rankings |
-| institutional-flow-tracker | `institutional_*.json` | Net institutional buying/selling |
 
 ### Step 2: Run Exposure Scoring Engine
 
@@ -100,7 +98,6 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
   --ftd reports/ftd_latest.json \
   --theme reports/theme_latest.json \
   --sector reports/sector_latest.json \
-  --institutional reports/institutional_latest.json \
   --output-dir reports/
 ```
 

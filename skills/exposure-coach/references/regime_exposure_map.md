@@ -56,7 +56,6 @@ This document maps macro regime states to baseline exposure ceilings and bias re
 - Uptrend participation < 20%
 - Defensive sectors (Utilities, Staples, Healthcare) leading
 - Credit spreads widening
-- Institutional selling detected
 
 **Baseline Exposure:** 10-30%
 **Bias:** Defensive / Cash
@@ -105,11 +104,7 @@ Even within a regime, the exposure ceiling adjusts based on:
    - Elevated top risk: -15% to ceiling
    - Critical top risk: Force CASH_PRIORITY regardless of regime
 
-3. **Institutional Flow**
-   - Strong buying: +5% to ceiling
-   - Strong selling: -10% to ceiling
-
-4. **FTD Anomalies**
+3. **FTD Anomalies**
    - Critical FTD level: -15% to ceiling
    - Forces extra caution on new entries
 
@@ -163,8 +158,7 @@ The regime provides the framework; other signals fine-tune:
 
 1. **Theme Detector** -- Identifies which themes to favor within bias
 2. **Sector Analyst** -- Confirms sector leadership alignment
-3. **Institutional Flow** -- Validates smart money direction
-4. **FTD Detector** -- Flags systemic stress
+3. **FTD Detector** -- Flags systemic stress
 
 When signals conflict:
 - Default to more conservative posture

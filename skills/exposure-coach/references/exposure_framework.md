@@ -90,17 +90,6 @@ Based on sector performance dispersion and leadership quality:
 | High dispersion, defensive leading | 30-49 |
 | Broad weakness | 0-29 |
 
-### Institutional Score
-
-Net institutional buying/selling trend:
-
-| Flow Direction | Score |
-|----------------|-------|
-| Strong net buying | 80-100 |
-| Mild net buying | 50-79 |
-| Neutral / Mixed | 30-49 |
-| Net selling | 0-29 |
-
 ## Composite Calculation
 
 ### Weighted Average
@@ -113,7 +102,6 @@ The composite score uses these weights:
 | Top Risk | 20% | Critical for downside protection |
 | Breadth | 15% | Market health indicator |
 | Uptrend | 15% | Participation confirmation |
-| Institutional | 10% | Smart money signal |
 | Sector | 5% | Rotation context |
 | Theme | 5% | Thematic momentum |
 | FTD | 5% | Stress indicator |
@@ -163,7 +151,6 @@ When inputs are missing:
 ### Value Bias
 - Regime = Inflationary
 - Sector shows financials/energy/materials leadership
-- Institutional flow favoring value sectors
 
 ### Neutral Bias
 - Conflicting signals or transitional regime

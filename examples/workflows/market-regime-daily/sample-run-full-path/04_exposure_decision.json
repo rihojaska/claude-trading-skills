@@ -19,7 +19,6 @@
   ],
   "inputs_missing": [
     "regime",
-    "institutional",
     "sector",
     "theme",
     "ftd"

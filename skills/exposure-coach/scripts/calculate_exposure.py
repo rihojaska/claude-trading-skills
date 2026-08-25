@@ -20,7 +20,6 @@ WEIGHTS = {
     "top_risk": 0.20,
     "breadth": 0.15,
     "uptrend": 0.15,
-    "institutional": 0.10,
     "sector": 0.05,
     "theme": 0.05,
     "ftd": 0.05,
@@ -36,7 +35,6 @@ INPUT_MAX_AGE_DAYS = {
     "regime": 35,
     "theme": 35,
     "sector": 35,
-    "institutional": 35,
     "breadth": 8,
     "uptrend": 8,
     "top_risk": 8,
@@ -99,7 +97,7 @@ _DATE_KEYS = _DATA_DATE_KEYS + _GENERATED_KEYS  # legacy alias (tests import it)
 def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     """Resolve an input's own internal date, or None if it carries none.
 
-    The live regime/theme/sector/institutional stubs carry no date at all;
+    The live regime/theme/sector stubs carry no date at all;
     breadth/uptrend/top_risk/ftd stamp `metadata.generated_at`.
     """
     if not isinstance(data, dict):
@@ -396,35 +394,6 @@ def extract_sector_score(data: Optional[dict]) -> Optional[int]:
     return None
 
 
-def extract_institutional_score(data: Optional[dict]) -> Optional[int]:
-    """Extract institutional flow score."""
-    if data is None:
-        return None
-    if "institutional_score" in data:
-        return int(data["institutional_score"])
-    if "net_flow" in data:
-        flow = data["net_flow"]
-        if flow > 0.5:
-            return 90
-        elif flow > 0:
-            return 70
-        elif flow > -0.5:
-            return 40
-        else:
-            return 20
-    if "flow_direction" in data:
-        direction = data["flow_direction"].lower()
-        mapping = {
-            "strong_buying": 90,
-            "buying": 70,
-            "neutral": 50,
-            "selling": 30,
-            "strong_selling": 15,
-        }
-        return mapping.get(direction, 50)
-    return None
-
-
 def calculate_composite_score(
     scores: dict[str, Optional[int]],
     stale: Sequence[str] = (),
@@ -524,7 +493,6 @@ def determine_bias(
     regime_name: str,
     theme_score: Optional[int],
     sector_data: Optional[dict],
-    institutional_data: Optional[dict],
 ) -> str:
     """Determine growth vs value bias."""
     regime_lower = regime_name.lower()
@@ -549,17 +517,6 @@ def determine_bias(
             return "VALUE"
         if lead in ["utilities", "staples", "healthcare"]:
             return "DEFENSIVE"
-
-    # Institutional flow
-    if institutional_data and "sector_flows" in institutional_data:
-        flows = institutional_data["sector_flows"]
-        if isinstance(flows, dict):
-            growth_flow = sum(flows.get(s, 0) for s in ["Technology", "Consumer Discretionary"])
-            value_flow = sum(flows.get(s, 0) for s in ["Financials", "Energy", "Industrials"])
-            if growth_flow > value_flow + 0.2:
-                return "GROWTH"
-            if value_flow > growth_flow + 0.2:
-                return "VALUE"
 
     return "NEUTRAL"
 
@@ -721,7 +678,6 @@ def generate_markdown_report(result: dict) -> str:
         "ftd",
         "theme",
         "sector",
-        "institutional",
     ]:
         score = result["component_scores"].get(f"{key}_score")
         if score is not None:
@@ -771,7 +727,10 @@ def main():
     parser.add_argument("--theme", type=Path, help="Path to theme-detector JSON")
     parser.add_argument("--sector", type=Path, help="Path to sector-analyst JSON")
     parser.add_argument(
-        "--institutional", type=Path, help="Path to institutional-flow-tracker JSON"
+        "--institutional",
+        type=Path,
+        help="Deprecated, ignored (institutional-flow-tracker retired, "
+        "WPP-20260825-006). Accepted for CLI compatibility only.",
     )
     parser.add_argument(
         "--as-of",
@@ -787,6 +746,12 @@ def main():
     parser.add_argument("--json-only", action="store_true", help="Output JSON only, skip markdown")
 
     args = parser.parse_args()
+    if args.institutional is not None:
+        print(
+            "Warning: --institutional is deprecated and ignored "
+            "(institutional-flow-tracker retired, WPP-20260825-006)",
+            file=sys.stderr,
+        )
     if args.as_of:
         ts = args.as_of
         if ts.endswith("Z"):
@@ -808,7 +773,6 @@ def main():
     ftd_data = load_json_file(args.ftd)
     theme_data = load_json_file(args.theme)
     sector_data = load_json_file(args.sector)
-    institutional_data = load_json_file(args.institutional)
 
     # Extract scores
     scores: dict[str, Optional[int]] = {
@@ -819,11 +783,10 @@ def main():
         "ftd": extract_ftd_score(ftd_data),
         "theme": extract_theme_score(theme_data),
         "sector": extract_sector_score(sector_data),
-        "institutional": extract_institutional_score(institutional_data),
     }
 
-    # Age every LOADED input — not only score-bearing ones: sector and
-    # institutional raw payloads reach determine_bias even when their score
+    # Age every LOADED input — not only score-bearing ones: sector
+    # raw payloads reach determine_bias even when their score
     # fails to extract, so a score-less-but-loaded input must still age out
     # (codex gate P2). A never-loaded input stays missing, not stale; a
     # loaded, score-less, aged-out input may appear in both buckets — that is
@@ -842,7 +805,6 @@ def main():
         "ftd": (ftd_data, args.ftd),
         "theme": (theme_data, args.theme),
         "sector": (sector_data, args.sector),
-        "institutional": (institutional_data, args.institutional),
     }
     stale_ages: dict[str, Optional[float]] = {}
     for key, (data, path) in input_paths.items():
@@ -857,7 +819,6 @@ def main():
     # missing one; it survives only in the diagnostics below.
     effective_scores = {k: (None if k in stale_ages else v) for k, v in scores.items()}
     effective_sector = None if "sector" in stale_ages else sector_data
-    effective_institutional = None if "institutional" in stale_ages else institutional_data
 
     # Calculate composite
     composite, provided, missing = calculate_composite_score(scores, stale=stale)
@@ -873,9 +834,7 @@ def main():
     )
 
     regime_name = "Unknown" if "regime" in stale_ages else extract_regime_name(regime_data)
-    bias = determine_bias(
-        regime_name, effective_scores["theme"], effective_sector, effective_institutional
-    )
+    bias = determine_bias(regime_name, effective_scores["theme"], effective_sector)
     participation = determine_participation(
         effective_scores["uptrend"], effective_scores["breadth"], effective_sector
     )

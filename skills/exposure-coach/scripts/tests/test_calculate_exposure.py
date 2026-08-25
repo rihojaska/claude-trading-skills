@@ -288,7 +288,7 @@ class TestRealUpstreamShapesAllCount:
         assert scores["ftd"] == 75  # direct
 
         composite, provided, missing = calculate_composite_score(
-            {**scores, "institutional": None, "sector": None, "theme": None}
+            {**scores, "sector": None, "theme": None}
         )
         # No critical input missing -> no haircut; healthy composite, not cash-priority
         assert set(missing).isdisjoint(CRITICAL_INPUTS)
@@ -304,16 +304,17 @@ class TestCalculateCompositeScore:
             "top_risk": 70,
             "breadth": 65,
             "uptrend": 60,
-            "institutional": 75,
             "sector": 70,
             "theme": 65,
             "ftd": 80,
         }
         composite, provided, missing = calculate_composite_score(scores)
-        assert len(provided) == 8
+        assert len(provided) == 7
         assert len(missing) == 0
-        # Weighted average check
-        expected = sum(scores[k] * WEIGHTS[k] for k in WEIGHTS)
+        # Weighted average check — renormalized over the used-weight sum
+        # (WEIGHTS no longer sums to 1.0 after the WEIGHTS dict shrank).
+        total_weight = sum(WEIGHTS.values())
+        expected = sum(scores[k] * WEIGHTS[k] for k in WEIGHTS) / total_weight
         assert abs(composite - expected) < 0.1
 
     def test_missing_critical_inputs(self):
@@ -322,7 +323,6 @@ class TestCalculateCompositeScore:
             "top_risk": None,  # critical
             "breadth": 65,  # critical but present
             "uptrend": 60,
-            "institutional": 75,
             "sector": 70,
             "theme": 65,
             "ftd": 80,
@@ -331,14 +331,14 @@ class TestCalculateCompositeScore:
         assert "regime" in missing
         assert "top_risk" in missing
         # Haircut applied: 2 critical missing * 10 = 20
-        assert len(provided) == 6
+        assert len(provided) == 5
 
     def test_no_inputs(self):
         scores = {k: None for k in WEIGHTS}
         composite, provided, missing = calculate_composite_score(scores)
         assert composite == 50.0  # Default when no inputs
         assert len(provided) == 0
-        assert len(missing) == 8
+        assert len(missing) == len(WEIGHTS)
 
 
 class TestDetermineExposureCeiling:
@@ -388,29 +388,29 @@ class TestDetermineBias:
     """Tests for bias determination."""
 
     def test_inflationary_regime(self):
-        bias = determine_bias("Inflationary", 50, None, None)
+        bias = determine_bias("Inflationary", 50, None)
         assert bias == "VALUE"
 
     def test_contraction_regime(self):
-        bias = determine_bias("Contraction", 50, None, None)
+        bias = determine_bias("Contraction", 50, None)
         assert bias == "DEFENSIVE"
 
     def test_broadening_with_strong_theme(self):
-        bias = determine_bias("Broadening", 75, None, None)
+        bias = determine_bias("Broadening", 75, None)
         assert bias == "GROWTH"
 
     def test_sector_leadership_technology(self):
         sector_data = {"leadership": "Technology"}
-        bias = determine_bias("Transitional", 50, sector_data, None)
+        bias = determine_bias("Transitional", 50, sector_data)
         assert bias == "GROWTH"
 
     def test_sector_leadership_financials(self):
         sector_data = {"leadership": "Financials"}
-        bias = determine_bias("Transitional", 50, sector_data, None)
+        bias = determine_bias("Transitional", 50, sector_data)
         assert bias == "VALUE"
 
     def test_neutral_default(self):
-        bias = determine_bias("Transitional", 50, None, None)
+        bias = determine_bias("Transitional", 50, None)
         assert bias == "NEUTRAL"
 
 
@@ -443,13 +443,13 @@ class TestDetermineConfidence:
 
     def test_medium_confidence(self):
         provided = ["regime", "breadth", "uptrend", "sector"]
-        missing = ["top_risk", "ftd", "theme", "institutional"]
+        missing = ["top_risk", "ftd", "theme"]
         conf = determine_confidence(provided, missing)
         assert conf == "MEDIUM"
 
     def test_low_confidence(self):
         provided = ["sector", "theme"]
-        missing = ["regime", "top_risk", "breadth", "uptrend", "ftd", "institutional"]
+        missing = ["regime", "top_risk", "breadth", "uptrend", "ftd"]
         conf = determine_confidence(provided, missing)
         assert conf == "LOW"
 
@@ -662,7 +662,7 @@ class TestExtractInputDate:
         assert parsed == datetime(2026, 8, 21, tzinfo=timezone.utc)
 
     def test_no_date_anywhere(self):
-        # The live regime/theme/sector/institutional stubs carry no date at all.
+        # The live regime/theme/sector stubs carry no date at all.
         assert extract_input_date({"regime": "broadening", "notes": "run 2026-06-09"}) is None
 
     def test_unparseable_date(self):
@@ -730,7 +730,7 @@ class TestCompositeStaleFilter:
         composite, provided, missing = calculate_composite_score(scores, stale=["theme"])
         assert "theme" not in provided
         assert "theme" not in missing  # stale is its own diagnostic bucket
-        assert len(provided) == 7
+        assert len(provided) == len(WEIGHTS) - 1
         # Renormalized over the fresh set: the 100 never enters the average.
         assert abs(composite - 60.0) < 0.01
 
@@ -755,7 +755,7 @@ class TestDetermineConfidenceStale:
         assert determine_confidence(provided, [], stale=["theme"]) == "MEDIUM"
 
     def test_stale_critical_caps_at_low(self):
-        provided = ["top_risk", "breadth", "uptrend", "ftd", "sector", "institutional"]
+        provided = ["top_risk", "breadth", "uptrend", "ftd", "sector"]
         assert determine_confidence(provided, [], stale=["regime"]) == "LOW"
 
     def test_no_stale_argument_preserves_behaviour(self):
@@ -914,7 +914,7 @@ class TestStaleRegimeCounterfactual:
 
 
 class TestUndatedInputsIntegration:
-    """The live reality: the regime/theme/sector/institutional stubs are undated."""
+    """The live reality: the regime/theme/sector stubs are undated."""
 
     def test_undated_critical_input_caps_confidence_and_eligibility(self, tmp_path):
         result = _run_main(
@@ -1060,3 +1060,47 @@ class TestLaggedComponentsAndReplayIdentity:
         }
         stale, age = assess_input_staleness("top_risk", d)
         assert stale is True
+
+
+class TestInstitutionalDeprecationW7:
+    """--institutional stays parseable but fully ignored (WPP-20260825-006)."""
+
+    def test_institutional_flag_deprecated_and_ignored(self, tmp_path, capsys):
+        import sys
+
+        from calculate_exposure import main
+
+        institutional_file = tmp_path / "institutional.json"
+        institutional_file.write_text(
+            json.dumps({"institutional_score": 90, "net_flow": 1.0}), encoding="utf-8"
+        )
+
+        output_dir = tmp_path / "reports"
+        original_argv = sys.argv
+        sys.argv = [
+            "calculate_exposure.py",
+            "--institutional",
+            str(institutional_file),
+            "--output-dir",
+            str(output_dir),
+        ]
+        try:
+            result = main()
+            assert result == 0
+        finally:
+            sys.argv = original_argv
+
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err.lower()
+        assert "institutional" in captured.err.lower()
+
+        json_files = list(output_dir.glob("exposure_posture_*.json"))
+        assert len(json_files) == 1
+        with open(json_files[0]) as f:
+            data = json.load(f)
+        assert "institutional" not in json.dumps(data).lower()
+
+        md_files = list(output_dir.glob("exposure_posture_*.md"))
+        assert len(md_files) == 1
+        md_content = md_files[0].read_text(encoding="utf-8")
+        assert "institutional" not in md_content.lower()
