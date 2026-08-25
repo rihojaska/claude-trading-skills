@@ -885,7 +885,11 @@ class TestStaleRegimeCounterfactual:
         )
         absent_run = _run_main(tmp_path / "absent", self._fresh_base())
         assert stale_run["exposure_ceiling_pct"] == absent_run["exposure_ceiling_pct"]
-        assert stale_run["recommendation"] == absent_run["recommendation"]
+        # Recommendation deliberately DIVERGES (codex-gate r4 P1): a stale
+        # critical caps at REDUCE_ONLY (expired evidence blocks new entries),
+        # while a single absent critical keeps the pre-existing >=2 contract.
+        assert stale_run["recommendation"] == "REDUCE_ONLY"
+        assert absent_run["recommendation"] == "NEW_ENTRY_ALLOWED"
         assert stale_run["composite_score"] == absent_run["composite_score"]
         assert "regime_score" not in stale_run["component_scores"]
         # Diagnostics are exactly where the two runs differ.
@@ -994,3 +998,23 @@ class TestInvalidDateEvidence:
         d = {"metadata": {"generated_at": "2026-08-25 07:00:00"}}
         parsed = calculate_exposure.extract_input_date(d)
         assert parsed is not None and parsed.year == 2026
+
+
+class TestStaleCriticalRecommendationCap:
+    """Codex gate r4 P1: a stale critical input caps the recommendation at
+    REDUCE_ONLY — None-ing a stale top_risk must not disable the risk guards
+    and let bullish survivors emit NEW_ENTRY_ALLOWED on expired evidence."""
+
+    def test_stale_critical_blocks_new_entry(self):
+        rec = determine_recommendation(89.0, None, 1, stale_critical=1)
+        assert rec == "REDUCE_ONLY"
+
+    def test_stale_critical_does_not_fabricate_cash_priority(self):
+        rec = determine_recommendation(89.0, None, 1, stale_critical=1)
+        assert rec != "CASH_PRIORITY"
+
+    def test_no_stale_criticals_unchanged(self):
+        assert determine_recommendation(89.0, 80, 0) == "NEW_ENTRY_ALLOWED"
+
+    def test_real_low_top_risk_still_cash_priority(self):
+        assert determine_recommendation(89.0, 20, 0) == "CASH_PRIORITY"

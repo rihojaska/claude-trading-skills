@@ -476,9 +476,20 @@ def determine_exposure_ceiling(composite: float) -> int:
 
 
 def determine_recommendation(
-    composite: float, top_risk_score: Optional[int], missing_critical: int
+    composite: float,
+    top_risk_score: Optional[int],
+    missing_critical: int,
+    stale_critical: int = 0,
 ) -> str:
-    """Determine action recommendation."""
+    """Determine action recommendation.
+
+    stale_critical (keyword-with-default): ANY stale critical input caps the
+    recommendation at REDUCE_ONLY (codex-gate r4 P1) — filtering a stale
+    top_risk to None would otherwise DISABLE the <25/<40 risk guards and let
+    bullish survivors emit NEW_ENTRY_ALLOWED on expired risk evidence. Cap,
+    not CASH_PRIORITY: stale evidence means the risk is UNKNOWN, which blocks
+    new entries but does not fabricate an active de-risking signal.
+    """
     # CASH_PRIORITY conditions
     if composite < 30:
         return "CASH_PRIORITY"
@@ -491,6 +502,8 @@ def determine_recommendation(
     if top_risk_score is not None and top_risk_score < 40:
         return "REDUCE_ONLY"
     if missing_critical >= 2:
+        return "REDUCE_ONLY"
+    if stale_critical >= 1:
         return "REDUCE_ONLY"
 
     return "NEW_ENTRY_ALLOWED"
@@ -804,7 +817,12 @@ def main():
     # (codex gate P2). A never-loaded input stays missing, not stale; a
     # loaded, score-less, aged-out input may appear in both buckets — that is
     # honest (it is stale AND unusable for the composite).
-    now = args_now
+    # freshness_now (possibly --as-of-pinned) drives ONLY staleness; `now`
+    # stays the real clock for generated_at and the output filename, so a
+    # historical replay cannot overwrite or misorder live artifacts
+    # (codex-gate r4 P2).
+    freshness_now = args_now
+    now = datetime.now(timezone.utc)
     input_paths = {
         "breadth": (breadth_data, args.breadth),
         "uptrend": (uptrend_data, args.uptrend),
@@ -819,7 +837,7 @@ def main():
     for key, (data, path) in input_paths.items():
         if data is None:
             continue
-        is_stale, age_days = assess_input_staleness(key, data, path, now=now)
+        is_stale, age_days = assess_input_staleness(key, data, path, now=freshness_now)
         if is_stale:
             stale_ages[key] = age_days
     stale = sorted(stale_ages)
@@ -837,7 +855,10 @@ def main():
     exposure_ceiling = determine_exposure_ceiling(composite)
     excluded_critical = len((set(missing) | set(stale)) & CRITICAL_INPUTS)
     recommendation = determine_recommendation(
-        composite, effective_scores["top_risk"], excluded_critical
+        composite,
+        effective_scores["top_risk"],
+        excluded_critical,
+        stale_critical=len(set(stale) & CRITICAL_INPUTS),
     )
 
     regime_name = "Unknown" if "regime" in stale_ages else extract_regime_name(regime_data)
