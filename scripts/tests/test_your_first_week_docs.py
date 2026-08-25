@@ -9,6 +9,7 @@ import re
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -186,8 +187,16 @@ def test_partial_exposure_inputs_are_fail_safe(
     breadth = tmp_path / "breadth.json"
     uptrend = tmp_path / "uptrend.json"
     output = tmp_path / "reports"
-    breadth.write_text(json.dumps({"breadth_score": breadth_score}), encoding="utf-8")
-    uptrend.write_text(json.dumps({"uptrend_score": uptrend_score}), encoding="utf-8")
+    # Both inputs carry a fresh internal date: calculate_exposure.py treats an
+    # undated input as stale and drops it from the composite, which is a
+    # different scenario than the partial-input fail-safe under test here.
+    fresh = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    breadth.write_text(
+        json.dumps({"breadth_score": breadth_score, "generated_at": fresh}), encoding="utf-8"
+    )
+    uptrend.write_text(
+        json.dumps({"uptrend_score": uptrend_score, "generated_at": fresh}), encoding="utf-8"
+    )
 
     subprocess.run(
         [

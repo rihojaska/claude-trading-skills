@@ -60,7 +60,9 @@ python3 skills/exposure-coach/scripts/calculate_exposure.py \
 
 The script accepts partial inputs; missing files reduce confidence but do not block execution.
 
-**Verification pitfall:** After each run, inspect the generated JSON fields `inputs_provided` and `inputs_missing`. If a file you passed on the CLI still appears in `inputs_missing` (for example a theme-detector JSON that the exposure engine did not recognize), report the affected dimension as degraded and keep confidence capped; do not assume the supplied input was incorporated just because the CLI argument was present.
+**Freshness contract:** Each input is aged against its own internal date (`generated_at` / `as_of` / `data_date`, top level or under `metadata`). An input older than its `INPUT_MAX_AGE_DAYS` bound — or carrying no date at all — is stale: it is excluded from the composite exactly like a missing input, the remaining weights are renormalized, and it is listed in `inputs_stale` (`age_days: null` means undated). Any stale input caps confidence at MEDIUM; a stale critical input (`regime`, `top_risk`, `breadth`) caps it at LOW and sets `ceiling_decision_eligible: false` — the ceiling is still rendered, but as advisory context rather than a decision input.
+
+**Verification pitfall:** After each run, inspect the generated JSON fields `inputs_provided`, `inputs_missing`, and `inputs_stale` (a supplied input that was aged out appears in none of the first two). If a file you passed on the CLI still appears in `inputs_missing` (for example a theme-detector JSON that the exposure engine did not recognize), report the affected dimension as degraded and keep confidence capped; do not assume the supplied input was incorporated just because the CLI argument was present.
 
 **Theme-detector ingestion caveat:** The theme detector commonly emits `theme_detector_YYYY-MM-DD_HHMMSS.json` with a `themes` object. If that file is not recognized by `calculate_exposure.py` and `theme` remains in `inputs_missing`, do not fold theme strength into the exposure ceiling manually. Instead, keep the Exposure Coach confidence capped, state that the theme dimension was not incorporated, and summarize theme/sector findings separately in the broader trading brief.
 
@@ -101,14 +103,12 @@ Map the posture recommendation to portfolio actions:
     "breadth_score": 65,
     "uptrend_score": 72,
     "regime_score": 80,
-    "top_risk_score": 25,
-    "ftd_score": 10,
-    "theme_score": 68,
-    "sector_score": 70,
-    "institutional_score": 75
+    "top_risk_score": 25
   },
   "inputs_provided": ["breadth", "uptrend", "regime", "top_risk"],
-  "inputs_missing": ["ftd", "theme", "sector", "institutional"],
+  "inputs_missing": ["ftd", "sector", "institutional"],
+  "inputs_stale": [{"input": "theme", "age_days": null}],
+  "ceiling_decision_eligible": true,
   "rationale": "Broad participation with low top risk supports elevated exposure."
 }
 ```

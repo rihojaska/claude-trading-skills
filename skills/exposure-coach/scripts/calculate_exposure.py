@@ -9,6 +9,7 @@ exposure ceiling, bias direction, and action recommendation.
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -27,6 +28,20 @@ WEIGHTS = {
 
 # Critical inputs that reduce confidence when missing
 CRITICAL_INPUTS = {"regime", "top_risk", "breadth"}
+
+# Maximum age (days) of an input's own internal date before it is stale.
+# Monthly-cadence detectors match the 35d market bound used by the portfolio
+# staleness checker; the weekly CSV-backed ones get 8d (one cycle + a day).
+INPUT_MAX_AGE_DAYS = {
+    "regime": 35,
+    "theme": 35,
+    "sector": 35,
+    "institutional": 35,
+    "breadth": 8,
+    "uptrend": 8,
+    "top_risk": 8,
+    "ftd": 8,
+}
 
 # Regime to baseline score mapping
 REGIME_SCORES = {
@@ -48,6 +63,84 @@ def load_json_file(path: Optional[Path]) -> Optional[dict]:
     except (OSError, json.JSONDecodeError) as e:
         print(f"Warning: Could not load {path}: {e}", file=sys.stderr)
         return None
+
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    """Parse an ISO-ish timestamp to aware UTC. None when it is not one."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        # fromisoformat rejects the military-zone suffix before 3.11.
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+# Internal-date keys, in precedence order: when the producer stamps run time it
+# wins over the data date. Checked at the top level, then inside `metadata`.
+_DATE_KEYS = ("generated_at", "as_of", "as_of_date", "data_date", "date")
+
+
+def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
+    """Resolve an input's own internal date, or None if it carries none.
+
+    The live regime/theme/sector/institutional stubs carry no date at all;
+    breadth/uptrend/top_risk/ftd stamp `metadata.generated_at`.
+    """
+    if not isinstance(data, dict):
+        return None
+    for key in _DATE_KEYS:
+        parsed = _parse_timestamp(data.get(key))
+        if parsed is not None:
+            return parsed
+    metadata = data.get("metadata")
+    if isinstance(metadata, dict):
+        for key in _DATE_KEYS + ("latest_data_date",):
+            parsed = _parse_timestamp(metadata.get(key))
+            if parsed is not None:
+                return parsed
+        freshness = metadata.get("data_freshness")
+        if isinstance(freshness, dict):
+            parsed = _parse_timestamp(freshness.get("latest_date"))
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def assess_input_staleness(
+    key: str,
+    data: Optional[dict],
+    path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> tuple[bool, Optional[float]]:
+    """Age one loaded input against INPUT_MAX_AGE_DAYS. Returns (is_stale, age_days).
+
+    Internal-date-first and fail-closed: an input carrying no resolvable date is
+    stale with age None ("undated"). These sidecars are git-tracked, so a
+    checkout resets mtime — an mtime read can only *age* an input here, never
+    freshen one. An absent input is missing, not stale.
+    """
+    if data is None:
+        return False, None
+    now = now or datetime.now(timezone.utc)
+    internal = extract_input_date(data)
+    if internal is None:
+        return True, None
+    age_days = (now - internal).total_seconds() / 86400.0
+    if path is not None:
+        try:
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            mtime = None
+        if mtime is not None:
+            age_days = max(age_days, (now - mtime).total_seconds() / 86400.0)
+    return age_days > INPUT_MAX_AGE_DAYS.get(key, 8), age_days
 
 
 def extract_breadth_score(data: Optional[dict]) -> Optional[int]:
@@ -276,19 +369,27 @@ def extract_institutional_score(data: Optional[dict]) -> Optional[int]:
 
 def calculate_composite_score(
     scores: dict[str, Optional[int]],
+    stale: Sequence[str] = (),
 ) -> tuple[float, list[str], list[str]]:
     """
-    Calculate weighted composite score.
+    Calculate weighted composite score over the fresh inputs only.
+
+    Stale inputs are excluded and the remaining weights renormalized: a stale
+    score must never move the verdict-bearing ceiling. They are their own
+    diagnostic bucket, so they appear in neither returned list.
 
     Returns:
         Tuple of (composite_score, inputs_provided, inputs_missing)
     """
+    stale_set = set(stale)
     provided = []
     missing = []
     weighted_sum = 0.0
     total_weight = 0.0
 
     for key, weight in WEIGHTS.items():
+        if key in stale_set:
+            continue
         score = scores.get(key)
         if score is not None:
             weighted_sum += score * weight
@@ -302,9 +403,10 @@ def calculate_composite_score(
 
     composite = weighted_sum / total_weight
 
-    # Apply haircut for missing critical inputs
-    missing_critical = set(missing) & CRITICAL_INPUTS
-    haircut = len(missing_critical) * 10
+    # Apply haircut for critical inputs that did not reach the composite —
+    # stale counts exactly like missing here.
+    excluded_critical = (set(missing) | stale_set) & CRITICAL_INPUTS
+    haircut = len(excluded_critical) * 10
     composite = max(0, composite - haircut)
 
     return composite, provided, missing
@@ -412,17 +514,28 @@ def determine_participation(
         return "NARROW"
 
 
-def determine_confidence(provided: list[str], missing: list[str]) -> str:
-    """Determine confidence level based on input completeness."""
-    n_provided = len(provided)
-    missing_critical = len(set(missing) & CRITICAL_INPUTS)
+def determine_confidence(provided: list[str], missing: list[str], stale: Sequence[str] = ()) -> str:
+    """Determine confidence level based on input completeness and freshness.
 
-    if n_provided >= 6 and missing_critical == 0:
-        return "HIGH"
-    elif n_provided >= 4 or missing_critical <= 1:
-        return "MEDIUM"
-    else:
+    Any stale (or undated) input caps confidence at MEDIUM; a stale critical
+    input caps it at LOW — the posture is then an honest low-confidence read,
+    not a HIGH rendered off months-old inputs.
+    """
+    stale_set = set(stale)
+    if stale_set & CRITICAL_INPUTS:
         return "LOW"
+
+    n_provided = len(provided)
+    excluded_critical = len((set(missing) | stale_set) & CRITICAL_INPUTS)
+
+    if n_provided >= 6 and excluded_critical == 0:
+        level = "HIGH"
+    elif n_provided >= 4 or excluded_critical <= 1:
+        level = "MEDIUM"
+    else:
+        level = "LOW"
+
+    return "MEDIUM" if stale_set and level == "HIGH" else level
 
 
 def generate_rationale(
@@ -432,8 +545,11 @@ def generate_rationale(
     bias: str,
     scores: dict[str, Optional[int]],
     missing: list[str],
+    exposure_ceiling: Optional[int] = None,
+    stale: Sequence[str] = (),
 ) -> str:
     """Generate human-readable rationale."""
+    stale_set = set(stale)
     parts = []
 
     # Participation assessment
@@ -450,13 +566,20 @@ def generate_rationale(
         elif top_risk < 40:
             parts.append("Elevated top risk signals warrant caution.")
 
-    # Regime context
+    # Regime context — suppressed when the regime input is stale; a months-old
+    # regime read must not narrate a posture it was excluded from.
     regime = scores.get("regime")
-    if regime is not None:
+    if regime is not None and "regime" not in stale_set:
         if regime >= 70:
             parts.append("Favorable macro regime supports elevated exposure.")
         elif regime < 40:
             parts.append("Challenging macro regime limits upside exposure.")
+
+    # Stale inputs
+    if stale_set:
+        parts.append(
+            f"Stale inputs ({', '.join(sorted(stale_set))}) were excluded from the composite."
+        )
 
     # Missing inputs
     if missing:
@@ -472,7 +595,10 @@ def generate_rationale(
     elif recommendation == "REDUCE_ONLY":
         parts.append("New entries not recommended; consider trimming on strength.")
     else:
-        parts.append(f"New positions allowed within the {int(composite)}% ceiling.")
+        # The sentence says "ceiling", so it must carry the emitted ceiling —
+        # the composite is a different number (63 vs 67 on 2026-08-24).
+        ceiling = int(composite) if exposure_ceiling is None else int(exposure_ceiling)
+        parts.append(f"New positions allowed within the {ceiling}% ceiling.")
 
     return " ".join(parts)
 
@@ -485,9 +611,28 @@ def generate_markdown_report(result: dict) -> str:
         "",
         f"## Exposure Ceiling: {result['exposure_ceiling_pct']}%",
         "",
-        "| Dimension | Score | Status |",
-        "|-----------|-------|--------|",
     ]
+
+    # Freshness disclosure. Keys are read defensively: results written before
+    # the staleness pass carry neither.
+    stale_inputs = result.get("inputs_stale") or []
+    if stale_inputs:
+        rendered = []
+        for entry in stale_inputs:
+            age = entry.get("age_days")
+            rendered.append(f"{entry['input']} ({'undated' if age is None else f'{age}d'})")
+        lines.append(f"⚠ Stale inputs (excluded from the composite): {', '.join(rendered)}")
+    if result.get("ceiling_decision_eligible") is False:
+        lines.append("⚠ Ceiling is advisory only — a critical input is stale.")
+    if stale_inputs:
+        lines.append("")
+
+    lines.extend(
+        [
+            "| Dimension | Score | Status |",
+            "|-----------|-------|--------|",
+        ]
+    )
 
     # Add component scores
     status_map = {
@@ -589,23 +734,65 @@ def main():
         "institutional": extract_institutional_score(institutional_data),
     }
 
+    # Age every input that produced a score. An input whose score did not
+    # extract is missing, not stale — the two buckets stay disjoint.
+    now = datetime.now(timezone.utc)
+    input_paths = {
+        "breadth": (breadth_data, args.breadth),
+        "uptrend": (uptrend_data, args.uptrend),
+        "regime": (regime_data, args.regime),
+        "top_risk": (top_risk_data, args.top_risk),
+        "ftd": (ftd_data, args.ftd),
+        "theme": (theme_data, args.theme),
+        "sector": (sector_data, args.sector),
+        "institutional": (institutional_data, args.institutional),
+    }
+    stale_ages: dict[str, Optional[float]] = {}
+    for key, (data, path) in input_paths.items():
+        if scores.get(key) is None:
+            continue
+        is_stale, age_days = assess_input_staleness(key, data, path, now=now)
+        if is_stale:
+            stale_ages[key] = age_days
+    stale = sorted(stale_ages)
+
+    # A stale input is dropped from every downstream calculation exactly like a
+    # missing one; it survives only in the diagnostics below.
+    effective_scores = {k: (None if k in stale_ages else v) for k, v in scores.items()}
+    effective_sector = None if "sector" in stale_ages else sector_data
+    effective_institutional = None if "institutional" in stale_ages else institutional_data
+
     # Calculate composite
-    composite, provided, missing = calculate_composite_score(scores)
+    composite, provided, missing = calculate_composite_score(scores, stale=stale)
 
     # Determine outputs
     exposure_ceiling = determine_exposure_ceiling(composite)
-    missing_critical = len(set(missing) & CRITICAL_INPUTS)
-    recommendation = determine_recommendation(composite, scores["top_risk"], missing_critical)
+    excluded_critical = len((set(missing) | set(stale)) & CRITICAL_INPUTS)
+    recommendation = determine_recommendation(
+        composite, effective_scores["top_risk"], excluded_critical
+    )
 
-    regime_name = extract_regime_name(regime_data)
-    bias = determine_bias(regime_name, scores["theme"], sector_data, institutional_data)
-    participation = determine_participation(scores["uptrend"], scores["breadth"], sector_data)
-    confidence = determine_confidence(provided, missing)
+    regime_name = "Unknown" if "regime" in stale_ages else extract_regime_name(regime_data)
+    bias = determine_bias(
+        regime_name, effective_scores["theme"], effective_sector, effective_institutional
+    )
+    participation = determine_participation(
+        effective_scores["uptrend"], effective_scores["breadth"], effective_sector
+    )
+    confidence = determine_confidence(provided, missing, stale=stale)
 
-    rationale = generate_rationale(composite, recommendation, participation, bias, scores, missing)
+    rationale = generate_rationale(
+        composite,
+        recommendation,
+        participation,
+        bias,
+        effective_scores,
+        missing,
+        exposure_ceiling=exposure_ceiling,
+        stale=stale,
+    )
 
     # Build result
-    now = datetime.now(timezone.utc)
     result = {
         "schema_version": "1.0",
         "generated_at": now.isoformat(),
@@ -615,9 +802,20 @@ def main():
         "recommendation": recommendation,
         "confidence": confidence,
         "composite_score": round(composite, 1),
-        "component_scores": {f"{k}_score": v for k, v in scores.items() if v is not None},
+        "component_scores": {f"{k}_score": v for k, v in effective_scores.items() if v is not None},
         "inputs_provided": provided,
         "inputs_missing": missing,
+        "inputs_stale": [
+            {
+                "input": k,
+                "age_days": None if stale_ages[k] is None else round(stale_ages[k], 1),
+            }
+            for k in stale
+        ],
+        # The ceiling stays rendered — blanking it is worse than an honest
+        # low-confidence posture — but a stale CRITICAL input makes it
+        # advisory-only for downstream consumers.
+        "ceiling_decision_eligible": not (set(stale) & CRITICAL_INPUTS),
         "rationale": rationale,
     }
 
