@@ -176,3 +176,33 @@ class TestSecondWriteRollback:
             with pytest.raises(OSError):
                 rg.write_reports(_analysis(), str(j), str(m))
         assert j.exists()
+
+
+class TestDefaultEncoderIsNotAnEscapeHatch:
+    """`default=str` routes AROUND `allow_nan=False`.
+
+    A non-finite value of a type `json` cannot encode natively — `Decimal("NaN")`,
+    a `numpy.float32` nan — never reaches the `allow_nan` check: `default` fires
+    and it lands in the artifact as the STRING `"nan"`, which every strict parser
+    accepts, including this file's own `parse_constant` oracle. That is the
+    forbidden substitution wearing the guard's costume.
+    """
+
+    def test_non_finite_decimal_is_refused_not_stringified(self):
+        from decimal import Decimal
+
+        with pytest.raises(ValueError):
+            rg.render_json_report(_analysis(qqq=Decimal("NaN")))
+
+    def test_non_finite_decimal_infinity_is_refused(self):
+        from decimal import Decimal
+
+        with pytest.raises(ValueError):
+            rg.render_json_report(_analysis(qqq=Decimal("Infinity")))
+
+    def test_a_finite_decimal_still_serializes(self):
+        """MUTANT: raise for every non-native type -> this healthy value breaks."""
+        from decimal import Decimal
+
+        text = rg.render_json_report(_analysis(qqq=Decimal("450.25")))
+        assert _strict_load(text)["metadata"]["index_prices"]["qqq"] == "450.25"

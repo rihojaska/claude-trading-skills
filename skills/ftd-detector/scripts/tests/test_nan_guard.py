@@ -229,10 +229,15 @@ class TestHistoryBoundary:
         assert client.cache == {}
         assert "historical:QQQ" not in client.data_sources
 
-    @pytest.mark.parametrize("bad", [0.0, -1.0, None, float("inf")])
+    @pytest.mark.parametrize("bad", [0.0, -1.0, None, float("inf"), True])
     def test_non_positive_and_non_real_closes_are_invalid(self, bad):
         """A zero close is not a market observation, and it is also the `x / 0`
         route by which a *finite* input still produces a NaN change_pct.
+
+        `True` is in the set deliberately: `isinstance(True, int)` holds and
+        `math.isfinite(True) and True > 0` both pass, so without the explicit
+        bool guard a payload decoding `"close": true` would be scored as a
+        $1.00 close — a second, narrower route to the same fabrication.
         """
         payload = {
             "symbol": "QQQ",
@@ -440,3 +445,57 @@ class TestContentFailureStillTriesTheNextEndpoint:
             out = client.get_quote("QQQ")
         assert out == [{"symbol": "QQQ", "price": 450.0}]
         assert client.data_sources["quote:QQQ"] == "fmp"
+
+
+class TestPerFieldOhlcValidation:
+    """A valid `close` does not make the bar valid.
+
+    `_yf_history._cell` resolves each OHLC field independently, so a bar with a
+    good Close and a NaN High/Low/Open is a realistic yfinance shape — and those
+    fields are not decorative: `high`/`low` drive `track_rally_attempt`'s
+    top-of-range Day-1 rule and `check_ftd_invalidation`'s `ftd_low`. Without
+    this, deleting the per-field loop from `_bar_is_valid` leaves the suite green.
+    """
+
+    @pytest.mark.parametrize("field", ["open", "high", "low", "adjClose"])
+    @pytest.mark.parametrize("bad", [NAN, 0.0, -1.0, None, True])
+    def test_a_bad_non_close_field_invalidates_the_bar(self, field, bad):
+        newest = {
+            "date": "2026-08-18",
+            "open": 102.0,
+            "high": 102.0,
+            "low": 102.0,
+            "close": 102.0,
+            "adjClose": 102.0,
+            "volume": 1_000,
+            field: bad,
+        }
+        payload = {
+            "symbol": "QQQ",
+            "historical": [newest] + _bars([("2026-08-17", 101.0, 1_000)]),
+        }
+        client = _client()
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
+            out = client.get_historical_prices("QQQ", days=2)
+        assert out is not None
+        assert [b["date"] for b in out["historical"]] == ["2026-08-17"]
+
+    @pytest.mark.parametrize("bad", [NAN, -1.0, True])
+    def test_a_bad_volume_invalidates_the_bar(self, bad):
+        newest = {
+            "date": "2026-08-18",
+            "open": 102.0,
+            "high": 102.0,
+            "low": 102.0,
+            "close": 102.0,
+            "adjClose": 102.0,
+            "volume": bad,
+        }
+        payload = {
+            "symbol": "QQQ",
+            "historical": [newest] + _bars([("2026-08-17", 101.0, 1_000)]),
+        }
+        client = _client()
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
+            out = client.get_historical_prices("QQQ", days=2)
+        assert [b["date"] for b in out["historical"]] == ["2026-08-17"]

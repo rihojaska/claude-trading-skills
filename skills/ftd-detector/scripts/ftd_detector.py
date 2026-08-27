@@ -242,7 +242,7 @@ def main():
 
     try:
         write_reports(analysis, json_file, md_file)
-    except (ValueError, TypeError) as exc:
+    except (ValueError, TypeError, OSError) as exc:
         # WPP-20260818-009. Reaching here means a non-finite or unformattable
         # value survived the client's validated-bar boundary, so the analysis
         # cannot be published as evidence: emit NEITHER artifact and say so.
@@ -254,15 +254,36 @@ def main():
         # "context never blocks" belongs at that boundary; inside the producer,
         # P5's "fail loud, emit nothing, never substitute" is what binds. The
         # prior behaviour published the JSON and then crashed on the markdown.
+        #
+        # The cause differs by exception type, and the diagnostic must say which:
+        # the task sidecar instructs the operator to copy this text verbatim into
+        # the Run Integrity table and to file a WPP row against the named layer.
+        # A single hard-coded "the boundary was bypassed" line would send every
+        # markdown-formatting bug to the wrong place.
+        if isinstance(exc, ValueError):
+            cause = (
+                "  A non-finite value reached the writer, which means a provider "
+                "path bypassed the client's validated-bar boundary "
+                "(fmp_client._validate_history) — fix it THERE, not here."
+            )
+        elif isinstance(exc, TypeError):
+            cause = (
+                "  The Markdown renderer could not format a value — typically a "
+                "legitimate None at a format site with no guard. Fix the "
+                "renderer (report_generator.render_markdown_report); the client "
+                "boundary is not implicated."
+            )
+        else:
+            cause = (
+                "  The report pair could not be written to disk. This is an I/O "
+                "failure, not a data defect: check the output directory, its "
+                "filesystem and free space."
+            )
         print()
         print("=" * 70, file=sys.stderr)
-        print(f"FATAL: report payload is not publishable: {exc}", file=sys.stderr)
-        print(
-            "  No JSON and no Markdown were written. A non-finite value reached "
-            "the writer, which means a provider path bypassed the client's "
-            "validated-bar boundary — fix it there, not here.",
-            file=sys.stderr,
-        )
+        print(f"FATAL: reports were not published: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print("  Neither the JSON nor the Markdown artifact was written.", file=sys.stderr)
+        print(cause, file=sys.stderr)
         print("=" * 70, file=sys.stderr)
         sys.exit(2)
 

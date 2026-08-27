@@ -6,6 +6,7 @@ Generates JSON and Markdown reports for FTD detection analysis.
 """
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -25,7 +26,39 @@ def render_json_report(analysis: dict) -> str:
     artifact (`correction_depth_pct`, `ftd_day_number`) and `allow_nan=False`
     accepts it. `None` is a *rendering* concern, handled where it is formatted.
     """
-    return json.dumps(analysis, indent=2, default=str, allow_nan=False)
+    return json.dumps(analysis, indent=2, default=_encode_unserializable, allow_nan=False)
+
+
+def _encode_unserializable(value):
+    """`json.dumps` fallback for types it cannot encode natively.
+
+    A blanket `default=str` is an escape hatch AROUND `allow_nan=False`: a
+    `Decimal("NaN")` or a `numpy.float32` NaN is not a native float, so `default`
+    fires and the value lands in the artifact as the STRING `"nan"` — which every
+    strict parser cheerfully accepts, including this suite's own
+    `parse_constant`-rejecting oracle. That is precisely P5's forbidden
+    substitution, wearing the costume of the guard meant to prevent it.
+
+    Not currently reachable (`_yf_history._cell` casts every value through
+    `float()`, and neither numpy nor Decimal appears in this skill), and
+    pre-existing — the previous `json.dump` carried the same `default=str`. It is
+    closed here rather than filed because it is a hole in the guard this change
+    ships, and because it is six lines.
+    """
+    # Duck-typed rather than `isinstance(value, numbers.Real)`: `Decimal` is a
+    # `numbers.Number` but NOT a `numbers.Real`, so a registry check would have
+    # missed `Decimal("NaN")` — the very case that motivated this function.
+    # Anything float-able is judged; anything else keeps the old `str` behaviour.
+    try:
+        as_float = float(value)
+    except (TypeError, ValueError):
+        pass
+    else:
+        if not math.isfinite(as_float):
+            raise ValueError(
+                f"Out of range float values are not JSON compliant: {value!r}"
+            )
+    return str(value)
 
 
 def _atomic_write_text(output_file: str, text: str) -> None:
