@@ -6,17 +6,74 @@ Generates JSON and Markdown reports for FTD detection analysis.
 """
 
 import json
+import os
+import tempfile
+
+
+def render_json_report(analysis: dict) -> str:
+    """Serialize the analysis strictly. Raises ValueError on any non-finite value.
+
+    `allow_nan=False` IS the payload validation — no separate walker is built
+    (P6). Python emits bare `NaN`/`Infinity` by default, which is not valid JSON:
+    `json.loads` with a `parse_constant` guard, `JSON.parse` and Go's
+    `encoding/json` all reject it, and the sibling pipeline
+    (`scripts/regional_pulse/composite.py`) already round-trips strictly, so a
+    poisoned artifact fails hard the moment anything downstream is wired to it.
+
+    `None` is deliberately NOT an error: `null` is a legitimate value in this
+    artifact (`correction_depth_pct`, `ftd_day_number`) and `allow_nan=False`
+    accepts it. `None` is a *rendering* concern, handled where it is formatted.
+    """
+    return json.dumps(analysis, indent=2, default=str, allow_nan=False)
+
+
+def _atomic_write_text(output_file: str, text: str) -> None:
+    """Write via temp file + `os.replace` — the house idiom.
+
+    Filenames here are timestamped, so there is no prior file to preserve; what
+    atomicity buys is that `promote_pulse_latest.py` globs dated sources, so a
+    half-written file is publishable.
+    """
+    directory = os.path.dirname(os.path.abspath(output_file)) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".partial")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, output_file)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
+    """Render BOTH artifacts, then write BOTH — or write neither.
+
+    The pair is the unit, not each file. Rendering JSON first and writing it
+    before the markdown renders means a markdown failure leaves a *current dated
+    JSON from a failed run* on disk, which the promoter will happily publish.
+    "A partial data pack is worse than no pack" applies to the pair.
+
+    Raises `ValueError` (non-finite payload) or `TypeError` (unformattable value)
+    before anything touches the filesystem; the caller turns that into a loud,
+    non-zero exit.
+    """
+    json_text = render_json_report(analysis)
+    md_text = render_markdown_report(analysis)
+    _atomic_write_text(json_file, json_text)
+    print(f"  JSON report saved to: {json_file}")
+    _atomic_write_text(md_file, md_text)
+    print(f"  Markdown report saved to: {md_file}")
 
 
 def generate_json_report(analysis: dict, output_file: str):
-    """Save full analysis as JSON."""
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(analysis, f, indent=2, default=str)
+    """Save full analysis as JSON (strict + atomic)."""
+    _atomic_write_text(output_file, render_json_report(analysis))
     print(f"  JSON report saved to: {output_file}")
 
 
-def generate_markdown_report(analysis: dict, output_file: str):
-    """Generate comprehensive Markdown report."""
+def render_markdown_report(analysis: dict) -> str:
+    """Render the comprehensive Markdown report to a string."""
     lines = []
     metadata = analysis.get("metadata", {})
     ms = analysis.get("market_state", {})
@@ -355,9 +412,12 @@ def generate_markdown_report(analysis: dict, output_file: str):
     )
     lines.append("")
 
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    return "\n".join(lines)
 
+
+def generate_markdown_report(analysis: dict, output_file: str):
+    """Save the Markdown report (atomic)."""
+    _atomic_write_text(output_file, render_markdown_report(analysis))
     print(f"  Markdown report saved to: {output_file}")
 
 

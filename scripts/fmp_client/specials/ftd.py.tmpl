@@ -11,6 +11,7 @@ Features:
 - Batch quote support
 """
 
+import math
 import os
 import sys
 import time
@@ -121,6 +122,127 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
     return {"symbol": matched_symbol or symbols_str, "historical": historical}
 
 
+# --- WPP-20260818-009: one validated-bar boundary for every provider ---------
+#
+# `float(x or 0)` cannot catch NaN — `bool(float("nan")) is True` — so the
+# yfinance fallback minted a NaN close on 2026-08-18, and `_normalize_eod_flat_list`
+# copies FMP row values verbatim, so the API side can mint one too (`json.loads`
+# accepts bare `NaN` by default). Downstream, NaN fails EVERY comparison: in
+# `rally_tracker.detect_ftd`, `NaN < FTD_GAIN_MINIMUM` is False, so a bar with no
+# close is not rejected — it is declared a Follow-Through Day, which fabricates
+# `dual_confirmation` and a 15-point quality component.
+#
+# The rule, stated once: no missing or non-finite observation may be converted
+# into a value that reads as a valid one, and no gap may be closed by making two
+# non-adjacent bars adjacent.
+
+
+def _finite_positive(value) -> bool:
+    """True for a real, finite, strictly positive number. `bool` is not a price."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value > 0
+
+
+def _finite_non_negative(value) -> bool:
+    """True for a real, finite, non-negative number (volume may legitimately be 0)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
+_PRICE_FIELDS = ("open", "high", "low", "adjClose")
+
+
+def _bar_is_valid(bar) -> bool:
+    """A bar is an observation iff `close` is a real, positive number and every
+    price/volume field it *carries* is one too.
+
+    Deliberately scoped to PRESENT fields. The defect is a non-finite value
+    reading as valid, not an incomplete payload: callers already have `.get(key,
+    default)` fallbacks for genuinely absent keys, and turning this into a
+    completeness requirement would reject legitimate partial responses — work
+    this row does not ask for (P6). A key present with `None` is *not* absent:
+    `.get("low", fallback)` returns the `None`, which is how a null close
+    reached `analyze_single_index` and raised `TypeError`.
+
+    `close > 0` is also what removes the `x / 0` route by which finite inputs
+    still produce a non-finite `change_pct` downstream.
+    """
+    if not isinstance(bar, dict):
+        return False
+    if not _finite_positive(bar.get("close")):
+        return False
+    if any(key in bar and not _finite_positive(bar[key]) for key in _PRICE_FIELDS):
+        return False
+    return "volume" not in bar or _finite_non_negative(bar["volume"])
+
+
+def _bar_date(bar) -> Optional[date]:
+    raw = bar.get("date") if isinstance(bar, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _validate_history(payload):
+    """Return `payload` with a trustworthy `historical`, or None.
+
+    * Trims LEADING invalid bars. `historical` is most-recent-first here, so a
+      leading invalid bar is an unsettled newest session; dropping it is
+      equivalent to running before that session existed and leaves everything
+      older contiguous.
+    * REJECTS the whole payload on any invalid bar after the first valid one.
+      `rally_tracker` counts rally days by position, so splicing out an interior
+      bar compresses day numbering, compares volume across non-adjacent sessions
+      and can manufacture an FTD — a silent wrong verdict in place of a loud NaN.
+    * REJECTS unless `date` is strictly descending. Trim-leading is only safe in
+      that order, and the v3 passthrough shape cannot be proven offline, so the
+      assumption is checked rather than assumed.
+    * Never repairs a field. Substituting 0.0 for a missing `low` would set
+      `ftd_low = 0`, permanently disabling `check_ftd_invalidation` — invisible,
+      and strictly worse than the NaN it replaced.
+    """
+    if not isinstance(payload, dict):
+        return None
+    bars = payload.get("historical")
+    if not isinstance(bars, list) or not bars:
+        return None
+
+    first_valid = None
+    for i, bar in enumerate(bars):
+        if _bar_is_valid(bar):
+            first_valid = i
+            break
+    if first_valid is None:
+        return None
+
+    kept = bars[first_valid:]
+    if not all(_bar_is_valid(bar) for bar in kept):
+        return None
+
+    previous = None
+    for bar in kept:
+        current = _bar_date(bar)
+        if current is None:
+            return None
+        if previous is not None and current >= previous:
+            return None
+        previous = current
+
+    if first_valid == 0:
+        # Validation is a check, not a transform. Returning the caller's own
+        # object keeps the pre-existing aliasing (`data["data_source"] = ...`
+        # writes through to the response dict) intact for the common path.
+        return payload
+    validated = dict(payload)
+    validated["historical"] = kept
+    return validated
+
+
 def _yf_history(symbol: str, days: int) -> Optional[dict]:
     """Fetch daily OHLCV from yfinance and normalize to FMP historical shape."""
     try:
@@ -137,17 +259,32 @@ def _yf_history(symbol: str, days: int) -> Optional[dict]:
     if hist is None or hist.empty:
         return None
 
+    # Construction must not be able to raise on any cell value: `int(NaN)` raises
+    # ValueError, and this loop runs newest-first, so the old `int(x or 0)` would
+    # have blown up on iteration 1 for the exact unsettled-latest-bar shape that
+    # trim-leading exists to salvage. Volume is carried as a float and int-cast
+    # only after `_validate_history` has judged the bar. Nothing is defaulted:
+    # judging validity belongs to the boundary, repairing a field belongs nowhere.
+    def _cell(row, key, fallback_key=None):
+        value = row.get(key)
+        if value is None and fallback_key is not None:
+            value = row.get(fallback_key)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
     rows = []
     for idx, row in hist.tail(days).iloc[::-1].iterrows():
         rows.append(
             {
                 "date": idx.date().isoformat(),
-                "open": float(row.get("Open", 0) or 0),
-                "high": float(row.get("High", 0) or 0),
-                "low": float(row.get("Low", 0) or 0),
-                "close": float(row.get("Close", 0) or 0),
-                "adjClose": float(row.get("Adj Close", row.get("Close", 0)) or 0),
-                "volume": int(row.get("Volume", 0) or 0),
+                "open": _cell(row, "Open"),
+                "high": _cell(row, "High"),
+                "low": _cell(row, "Low"),
+                "close": _cell(row, "Close"),
+                "adjClose": _cell(row, "Adj Close", "Close"),
+                "volume": _cell(row, "Volume"),
             }
         )
     if not rows:
@@ -161,10 +298,17 @@ def _yf_quote(symbol: str) -> Optional[dict]:
     if not hist or not hist.get("historical"):
         return None
     latest = hist["historical"][0]
+    # The NEWEST RAW bar, deliberately — not the newest surviving one. Reporting
+    # a prior session's close under a `quote` provenance label would make the
+    # artifact's own source field assert something untrue. Returning None routes
+    # the caller into its documented "using historical close as current price"
+    # branch, which labels the number honestly.
+    if not _bar_is_valid(latest):
+        return None
     prev = hist["historical"][1] if len(hist["historical"]) > 1 else latest
-    price = latest.get("close") or latest.get("adjClose")
-    prev_price = prev.get("close") or prev.get("adjClose") or price
-    change = (price or 0) - (prev_price or 0)
+    price = latest["close"]
+    prev_price = prev.get("close") if _bar_is_valid(prev) else price
+    change = price - prev_price
     change_pct = (change / prev_price * 100) if prev_price else 0
     return {
         "symbol": symbol,
@@ -360,17 +504,25 @@ class FMPClient:
             return self.cache[cache_key]
 
         data = self._request_with_fallback("quote", symbols)
+        # A quote whose price is not a real, positive number is not a quote —
+        # `json.loads` accepts bare `NaN`, so this is an API-side path, not only
+        # a yfinance one. Drop the bad entries BEFORE provenance and cache, and
+        # let an empty remainder fall through to the next source.
+        if isinstance(data, list):
+            data = [q for q in data if isinstance(q, dict) and _finite_positive(q.get("price"))] or None
+        elif data is not None and not isinstance(data, list):
+            data = None
         if not data:
             quotes = []
             for symbol in symbols.split(","):
                 quote = _yf_quote(symbol)
-                if quote:
+                if quote and _finite_positive(quote.get("price")):
                     quotes.append(quote)
                     self.data_sources[f"quote:{symbol}"] = "yfinance"
             data = quotes or None
         else:
-            for symbol in symbols.split(","):
-                self.data_sources[f"quote:{symbol}"] = "fmp"
+            for quote in data:
+                self.data_sources[f"quote:{quote.get('symbol', symbols)}"] = "fmp"
         if data:
             self.cache[cache_key] = data
         return data
@@ -381,10 +533,26 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        data = self._request_with_fallback("historical", symbol, {"timeseries": days})
+        # Validation runs BEFORE the provenance stamp and BEFORE the cache write:
+        # a rejected payload must not claim a source it could not supply, and must
+        # not be cached, or every later caller (including `get_batch_historical`)
+        # is re-served the same poison from memory.
+        data = _validate_history(
+            self._request_with_fallback("historical", symbol, {"timeseries": days})
+        )
         if not data:
-            data = _yf_history(symbol, days)
+            data = _validate_history(_yf_history(symbol, days))
             if data:
+                # `_yf_history` carries volume as a float so construction cannot
+                # raise on a NaN cell; restore the integral shape now that the
+                # bar has been judged. FMP payloads are left byte-untouched.
+                data["historical"] = [
+                    {**bar, "volume": int(bar["volume"])}
+                    if _finite_non_negative(bar.get("volume"))
+                    else bar
+                    for bar in data["historical"]
+                ]
+                data["data_source"] = "yfinance"
                 self.data_sources[f"historical:{symbol}"] = "yfinance"
         else:
             data["data_source"] = data.get("data_source", "fmp")

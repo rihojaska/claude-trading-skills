@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fmp_client import FMPClient
 from post_ftd_monitor import assess_post_ftd_health
 from rally_tracker import get_market_state
-from report_generator import generate_json_report, generate_markdown_report
+from report_generator import write_reports
 
 
 def parse_arguments():
@@ -240,8 +240,31 @@ def main():
     json_file = os.path.join(args.output_dir, f"ftd_detector_{timestamp}.json")
     md_file = os.path.join(args.output_dir, f"ftd_detector_{timestamp}.md")
 
-    generate_json_report(analysis, json_file)
-    generate_markdown_report(analysis, md_file)
+    try:
+        write_reports(analysis, json_file, md_file)
+    except (ValueError, TypeError) as exc:
+        # WPP-20260818-009. Reaching here means a non-finite or unformattable
+        # value survived the client's validated-bar boundary, so the analysis
+        # cannot be published as evidence: emit NEITHER artifact and say so.
+        #
+        # Exiting non-zero is safe here in a way it was NOT for the allocator
+        # sidecar (S-ALLOCATOR, 2026-08-27): nothing runs this script under
+        # `subprocess(check=True)` — it is invoked by the weekly-market-pulse
+        # task, whose sidecar carries the typed continuation contract. P5's
+        # "context never blocks" belongs at that boundary; inside the producer,
+        # P5's "fail loud, emit nothing, never substitute" is what binds. The
+        # prior behaviour published the JSON and then crashed on the markdown.
+        print()
+        print("=" * 70, file=sys.stderr)
+        print(f"FATAL: report payload is not publishable: {exc}", file=sys.stderr)
+        print(
+            "  No JSON and no Markdown were written. A non-finite value reached "
+            "the writer, which means a provider path bypassed the client's "
+            "validated-bar boundary — fix it there, not here.",
+            file=sys.stderr,
+        )
+        print("=" * 70, file=sys.stderr)
+        sys.exit(2)
 
     print()
     print("=" * 70)

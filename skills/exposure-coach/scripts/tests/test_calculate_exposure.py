@@ -1104,3 +1104,47 @@ class TestInstitutionalDeprecationW7:
         assert len(md_files) == 1
         md_content = md_files[0].read_text(encoding="utf-8")
         assert "institutional" not in md_content.lower()
+
+
+# =========================================================================
+# WPP-20260818-009 — a self-declared non-decision-grade FTD is an ABSENT input
+# =========================================================================
+
+
+class TestFtdDecisionGradeGate:
+    """ftd-detector emits `metadata.data_coverage.decision_grade: false` when QQQ
+    is unavailable and it scores the S&P alone. That label existed and nothing
+    read it, so the degraded score was folded into the posture at full weight.
+
+    The S-FTD boundary makes that path MORE reachable (every rejected provider
+    payload now routes there), so leaving the consumer blind would have been
+    shipping a change that increases traffic into a known P5 violation.
+    """
+
+    def _payload(self, decision_grade):
+        coverage = {"reason": "test"}
+        if decision_grade is not None:
+            coverage["decision_grade"] = decision_grade
+        return {
+            "metadata": {"data_coverage": coverage},
+            "quality_score": {"total_score": 95, "signal": "Strong FTD"},
+        }
+
+    def test_explicit_false_is_treated_as_absent(self):
+        assert extract_ftd_score(self._payload(False)) is None
+
+    def test_explicit_true_is_scored(self):
+        assert extract_ftd_score(self._payload(True)) == 95
+
+    def test_absent_key_is_not_evidence_of_degradation(self):
+        """MUTANT: gate on falsiness instead of `is False` -> this returns None,
+        and every producer shape without a `data_coverage` block goes dark."""
+        assert extract_ftd_score(self._payload(None)) == 95
+        assert extract_ftd_score({"quality_score": {"total_score": 95}}) == 95
+
+    def test_other_producer_branches_are_untouched(self):
+        """Only the ftd-detector-shaped branch is gated; `ftd_score` and
+        `anomaly_level` belong to different producers' schemas."""
+        degraded = {"metadata": {"data_coverage": {"decision_grade": False}}}
+        assert extract_ftd_score({**degraded, "ftd_score": 70}) == 70
+        assert extract_ftd_score({**degraded, "anomaly_level": "low"}) == 80

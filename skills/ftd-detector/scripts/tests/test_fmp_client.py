@@ -413,8 +413,11 @@ class TestCallerRegression:
                     ftd_detector.FMPClient, "get_historical_prices", side_effect=mock_hist
                 ),
                 patch.object(ftd_detector.FMPClient, "get_quote", return_value=None),
-                patch.object(ftd_detector, "generate_json_report"),
-                patch.object(ftd_detector, "generate_markdown_report"),
+                # WPP-20260818-009: the two writers were replaced by one
+                # pair-atomic entry point — both artifacts render before either
+                # is written, so a markdown failure can no longer leave a dated
+                # JSON from a failed run for the promoter to publish.
+                patch.object(ftd_detector, "write_reports"),
             ):
                 # Should NOT raise SystemExit — quote failure is non-fatal
                 ftd_detector.main()

@@ -351,8 +351,22 @@ def extract_ftd_score(data: Optional[dict]) -> Optional[int]:
     if "ftd_score" in data:
         return int(data["ftd_score"])
     # ftd-detector real shape: {"quality_score": {"total_score": 0-100, ...}}
+    # WPP-20260818-009: ftd-detector labels a QQQ-less run non-decision-grade,
+    # and that label was being read by nobody — an S&P-only score was folded in
+    # at full weight, which is P5's "a partial data pack is worse than no pack"
+    # violated by the consumer, not the producer. Returning None routes into the
+    # module's normal absent-input path.
+    #
+    # Gated on `is False`, not falsiness: an ABSENT key is not evidence of
+    # degradation (every other producer's shape lacks it), and only this
+    # ftd-detector-shaped branch is gated — the `ftd_score` and `anomaly_level`
+    # branches above and below belong to different producers.
     quality = data.get("quality_score")
     if isinstance(quality, dict) and quality.get("total_score") is not None:
+        coverage = data.get("metadata", {})
+        coverage = coverage.get("data_coverage", {}) if isinstance(coverage, dict) else {}
+        if isinstance(coverage, dict) and coverage.get("decision_grade") is False:
+            return None
         return max(0, min(100, int(quality["total_score"])))
     if "anomaly_level" in data:
         level = data["anomaly_level"].lower()
