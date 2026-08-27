@@ -157,9 +157,13 @@ class TestSecondWriteRollback:
         assert not m.exists()
         assert sorted(p.name for p in tmp_path.iterdir()) == []
 
-    def test_a_pre_existing_json_is_never_deleted(self, tmp_path):
-        """Rollback only removes a file we created. Deleting someone else's
-        artifact would be a worse failure than the half-pair it repairs."""
+    def test_a_pre_existing_json_is_restored_byte_for_byte(self, tmp_path):
+        """Rollback must be TOTAL. Skipping it when the target pre-existed left
+        the old report already overwritten AND a JSON-only pair on disk for the
+        promoter to select — the worst of both outcomes.
+
+        MUTANT: skip rollback when the file pre-existed -> the JSON on disk is
+        the failed run's, not the prior one's."""
         j = tmp_path / "ftd_detector_2026-08-27_090000.json"
         m = tmp_path / "ftd_detector_2026-08-27_090000.md"
         j.write_text('{"previous": true}')
@@ -176,6 +180,8 @@ class TestSecondWriteRollback:
             with pytest.raises(OSError):
                 rg.write_reports(_analysis(), str(j), str(m))
         assert j.exists()
+        assert json.loads(j.read_text()) == {"previous": True}
+        assert not m.exists()
 
 
 class TestDefaultEncoderIsNotAnEscapeHatch:

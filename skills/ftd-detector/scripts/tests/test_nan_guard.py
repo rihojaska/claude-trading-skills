@@ -499,3 +499,76 @@ class TestPerFieldOhlcValidation:
         with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
             out = client.get_historical_prices("QQQ", days=2)
         assert [b["date"] for b in out["historical"]] == ["2026-08-17"]
+
+
+# ---------------------------------------------------------------------------
+# codex gate r2 — a trim is for an unsettled bar, and order proof must be
+# required only where it is load-bearing
+# ---------------------------------------------------------------------------
+class TestTrimIsCapped:
+    """An outage is not an unsettled session.
+
+    Uncapped, an 80-row response whose newest 58 rows are invalid became a
+    22-row STALE history that still scored and still labelled itself
+    decision-grade, feeding exposure-coach at full weight.
+    """
+
+    def test_trimming_at_the_cap_still_yields_history(self):
+        specs = [(f"2026-08-{28 - i:02d}", NAN, 1_000) for i in range(3)]
+        specs += [(f"2026-08-{25 - i:02d}", 100.0 + i, 1_000) for i in range(6)]
+        client = _client()
+        with _transport({"symbol": "QQQ", "historical": _bars(specs)}):
+            out = client.get_historical_prices("QQQ", days=9)
+        assert out is not None
+        assert len(out["historical"]) == 6
+
+    def test_trimming_past_the_cap_refuses_the_whole_payload(self):
+        """MUTANT: remove the cap -> a mostly-dead payload becomes a short,
+        stale history that scores as if current."""
+        specs = [(f"2026-08-{28 - i:02d}", NAN, 1_000) for i in range(4)]
+        specs += [(f"2026-08-{24 - i:02d}", 100.0 + i, 1_000) for i in range(6)]
+        client = _client()
+        with _transport({"symbol": "QQQ", "historical": _bars(specs)}), patch.object(
+            fc, "_yf_history", return_value=None
+        ):
+            assert client.get_historical_prices("QQQ", days=10) is None
+
+
+class TestOrderProofIsRequiredOnlyWhereLoadBearing:
+    """FMP's v3 shape is legitimately minimal — bars carrying only `close`.
+
+    Demanding a parseable `date` on every bar rejected valid responses and broke
+    the symbol-mismatch fallback, which then passed only because the yfinance
+    fallback reached the live network. A payload that carries no dates and needs
+    no trim asserts no adjacency, so there is nothing to prove.
+    """
+
+    def test_undated_minimal_payload_is_accepted_when_nothing_is_trimmed(self):
+        client = _client()
+        payload = {"symbol": "^GSPC", "historical": [{"close": 5000}]}
+        with _transport(payload):
+            out = client.get_historical_prices("^GSPC", days=80)
+        assert out["symbol"] == "^GSPC"
+
+    def test_undated_payload_is_refused_when_a_trim_would_be_needed(self):
+        """No dates and a leading invalid bar: "leading == newest" is exactly
+        what cannot be proven, so the trim is not allowed."""
+        client = _client()
+        payload = {"symbol": "^GSPC", "historical": [{"close": NAN}, {"close": 5000}]}
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
+            assert client.get_historical_prices("^GSPC", days=80) is None
+
+    def test_a_mix_of_dated_and_undated_bars_is_refused(self):
+        """MUTANT: accept a partial-date payload -> a malformed response whose
+        order can be neither proven nor disproven is scored."""
+        client = _client()
+        payload = {
+            "symbol": "^GSPC",
+            "historical": [
+                {"date": "2026-08-18", "close": 5000.0},
+                {"close": 4990.0},
+                {"date": "2026-08-14", "close": 4980.0},
+            ],
+        }
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
+            assert client.get_historical_prices("^GSPC", days=3) is None

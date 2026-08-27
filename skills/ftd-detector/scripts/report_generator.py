@@ -101,20 +101,34 @@ def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
     # back — and only when we created it, since a pre-existing file cannot be
     # restored and silently deleting someone else's artifact would be worse than
     # the half-pair. Timestamped filenames mean the rollback path is the norm.
-    json_existed = os.path.exists(json_file)
+    previous_json = None
+    if os.path.exists(json_file):
+        try:
+            with open(json_file, "rb") as handle:
+                previous_json = handle.read()
+        except OSError:
+            previous_json = None
+
     _atomic_write_text(json_file, json_text)
     try:
         _atomic_write_text(md_file, md_text)
     except BaseException:
-        if not json_existed:
-            try:
+        # Rollback must be TOTAL. Skipping it when the target pre-existed left the
+        # old report already overwritten and a JSON-only pair on disk for
+        # `promote_pulse_latest.py` to select (codex gate r2), so the prior bytes
+        # are captured up front and put back.
+        try:
+            if previous_json is None:
                 os.unlink(json_file)
-            except OSError:
-                print(
-                    f"  WARNING: could not roll back {json_file} after a Markdown "
-                    "write failure — a partial pack may be promotable.",
-                    file=sys.stderr,
-                )
+            else:
+                with open(json_file, "wb") as handle:
+                    handle.write(previous_json)
+        except OSError:
+            print(
+                f"  WARNING: could not roll back {json_file} after a Markdown "
+                "write failure — a partial pack may be promotable.",
+                file=sys.stderr,
+            )
         raise
 
     # Printed only once BOTH artifacts are on disk: announcing the JSON between

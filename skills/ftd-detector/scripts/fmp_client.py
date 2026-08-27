@@ -156,6 +156,13 @@ def _finite_non_negative(value) -> bool:
 
 _PRICE_FIELDS = ("open", "high", "low", "adjClose")
 
+# How many leading (newest) invalid bars may be trimmed before the payload is
+# refused outright. Trimming exists for a session that has not settled yet — one
+# bar in the ordinary case, a little slack for a provider that emits placeholder
+# rows across a holiday stretch. Beyond that it is an outage, not an unsettled
+# bar, and the honest answer is no history rather than a truncated one.
+_MAX_LEADING_TRIM = 3
+
 
 def _bar_is_valid(bar) -> bool:
     """A bar is an observation iff `close` is a real, positive number and every
@@ -215,28 +222,44 @@ def _validate_history(payload):
     if not isinstance(bars, list) or not bars:
         return None
 
-    # Order is proven over the WHOLE list FIRST, before anything is trimmed.
-    # Checking only the surviving tail would let a discarded prefix bar be
-    # chronologically INTERIOR: an invalid 2026-08-16 ahead of a valid
-    # 2026-08-18 / 08-17 / 08-15 leaves a descending remainder, but the session
-    # dropped from between 08-17 and 08-15 is exactly the false adjacency this
-    # function exists to prevent (codex gate r1). Descending order is what makes
-    # "leading == newest" true, so it has to hold before trimming means anything.
-    previous = None
-    for bar in bars:
-        current = _bar_date(bar)
-        if current is None:
-            return None
-        if previous is not None and current >= previous:
-            return None
-        previous = current
-
     first_valid = None
     for i, bar in enumerate(bars):
         if _bar_is_valid(bar):
             first_valid = i
             break
     if first_valid is None:
+        return None
+
+    # Trimming is for an UNSETTLED NEWEST SESSION, not for an outage. Without a
+    # cap, an 80-row response whose newest 58 rows are invalid would silently
+    # become a 22-row stale history that still scores and still labels itself
+    # decision-grade (codex gate r2). A run that has lost most of its recent
+    # sessions has no business producing a verdict.
+    if first_valid > _MAX_LEADING_TRIM:
+        return None
+
+    # Order is proven over the WHOLE list, BEFORE anything is trimmed — checking
+    # only the surviving tail would let a discarded prefix bar be chronologically
+    # INTERIOR: an invalid 2026-08-16 ahead of a valid 08-18 / 08-17 / 08-15
+    # leaves a descending remainder while deleting the session between 08-17 and
+    # 08-15 (codex gate r1). Descending order is what makes "leading == newest"
+    # true, so it must hold before trimming means anything.
+    #
+    # But it is required only WHERE IT IS LOAD-BEARING. A payload that carries no
+    # dates at all and needs no trim asserts no adjacency, and FMP's v3 shape is
+    # legitimately minimal — demanding a `date` on every bar rejected valid
+    # responses and broke the symbol-mismatch fallback (codex gate r2). So: all
+    # bars dated -> prove the order; none dated and nothing trimmed -> accept;
+    # anything in between, or any trim without provable order -> refuse.
+    parsed = [_bar_date(bar) for bar in bars]
+    dated = [d is not None for d in parsed]
+    if all(dated):
+        previous = None
+        for current in parsed:
+            if previous is not None and current >= previous:
+                return None
+            previous = current
+    elif any(dated) or first_valid > 0:
         return None
 
     kept = bars[first_valid:]
