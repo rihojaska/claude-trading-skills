@@ -212,6 +212,22 @@ def _validate_history(payload):
     if not isinstance(bars, list) or not bars:
         return None
 
+    # Order is proven over the WHOLE list FIRST, before anything is trimmed.
+    # Checking only the surviving tail would let a discarded prefix bar be
+    # chronologically INTERIOR: an invalid 2026-08-16 ahead of a valid
+    # 2026-08-18 / 08-17 / 08-15 leaves a descending remainder, but the session
+    # dropped from between 08-17 and 08-15 is exactly the false adjacency this
+    # function exists to prevent (codex gate r1). Descending order is what makes
+    # "leading == newest" true, so it has to hold before trimming means anything.
+    previous = None
+    for bar in bars:
+        current = _bar_date(bar)
+        if current is None:
+            return None
+        if previous is not None and current >= previous:
+            return None
+        previous = current
+
     first_valid = None
     for i, bar in enumerate(bars):
         if _bar_is_valid(bar):
@@ -223,15 +239,6 @@ def _validate_history(payload):
     kept = bars[first_valid:]
     if not all(_bar_is_valid(bar) for bar in kept):
         return None
-
-    previous = None
-    for bar in kept:
-        current = _bar_date(bar)
-        if current is None:
-            return None
-        if previous is not None and current >= previous:
-            return None
-        previous = current
 
     if first_valid == 0:
         # Validation is a check, not a transform. Returning the caller's own
@@ -458,8 +465,15 @@ class FMPClient:
                             }
                             break
                     if found:
-                        self._endpoint_failures[base_url] = 0
-                        return found
+                        validated = _validate_history(found)
+                        if validated:
+                            self._endpoint_failures[base_url] = 0
+                            return validated
+                        self._record_endpoint_failure(base_url)
+                        self._warn_fallback(
+                            base_url, is_last, "no trustworthy bars in historicalStockList entry"
+                        )
+                        continue
                     valid = False
                     shape_issue = f"'{symbols_str}' not in historicalStockList"
                 elif "historical" not in data:
@@ -471,6 +485,31 @@ class FMPClient:
                         shape_issue = (
                             f"response symbol '{data['symbol']}' != requested '{symbols_str}'"
                         )
+
+            # Content validation runs HERE, inside the endpoint loop — not in the
+            # public wrapper. A stable response that is shape-valid but carries a
+            # non-finite or out-of-order bar is a FAILED ENDPOINT, so v3 must be
+            # tried next; validating one level up skipped straight to yfinance and
+            # turned a recoverable response into missing history (codex gate r1).
+            if valid:
+                if endpoint_key == "historical":
+                    validated = _validate_history(data)
+                    if not validated:
+                        valid = False
+                        shape_issue = "no trustworthy bars (non-finite or out-of-order)"
+                    else:
+                        data = validated
+                elif endpoint_key == "quote":
+                    kept_quotes = [
+                        q
+                        for q in data
+                        if isinstance(q, dict) and _finite_positive(q.get("price"))
+                    ]
+                    if not kept_quotes:
+                        valid = False
+                        shape_issue = "no quote carried a real, positive price"
+                    else:
+                        data = kept_quotes
 
             if valid:
                 self._endpoint_failures[base_url] = 0
@@ -503,15 +542,9 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
+        # FMP-side price validation lives in `_request_with_fallback` so a bad
+        # stable response falls through to v3 rather than skipping to yfinance.
         data = self._request_with_fallback("quote", symbols)
-        # A quote whose price is not a real, positive number is not a quote —
-        # `json.loads` accepts bare `NaN`, so this is an API-side path, not only
-        # a yfinance one. Drop the bad entries BEFORE provenance and cache, and
-        # let an empty remainder fall through to the next source.
-        if isinstance(data, list):
-            data = [q for q in data if isinstance(q, dict) and _finite_positive(q.get("price"))] or None
-        elif data is not None and not isinstance(data, list):
-            data = None
         if not data:
             quotes = []
             for symbol in symbols.split(","):
@@ -533,13 +566,14 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        # Validation runs BEFORE the provenance stamp and BEFORE the cache write:
-        # a rejected payload must not claim a source it could not supply, and must
-        # not be cached, or every later caller (including `get_batch_historical`)
-        # is re-served the same poison from memory.
-        data = _validate_history(
-            self._request_with_fallback("historical", symbol, {"timeseries": days})
-        )
+        # The FMP endpoints validate inside `_request_with_fallback` (so a bad
+        # stable response still gets v3 tried); the yfinance fallback below has no
+        # such loop, so it is validated here. Both go through the SAME predicate,
+        # and in both cases validation precedes the provenance stamp and the cache
+        # write — a rejected payload must not claim a source it could not supply,
+        # and must not be cached, or every later caller (`get_batch_historical`
+        # included) is re-served the same poison from memory.
+        data = self._request_with_fallback("historical", symbol, {"timeseries": days})
         if not data:
             data = _validate_history(_yf_history(symbol, days))
             if data:

@@ -120,6 +120,23 @@ def _client():
         return FMPClient()
 
 
+def _transport(*responses):
+    """Patch the TRANSPORT, not `_request_with_fallback`.
+
+    Content validation lives inside the endpoint loop so a shape-valid but
+    untrustworthy stable response still gets v3 tried (codex gate r1). Patching
+    the wrapper would skip the very loop under test; each positional argument
+    here is one endpoint's parsed response, in stable-then-v3 order, and a single
+    argument answers every endpoint.
+    """
+    queue = list(responses)
+
+    def _get(self, url, params=None, quiet=False):
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    return patch.object(FMPClient, "_rate_limited_get", _get)
+
+
 # ---------------------------------------------------------------------------
 # T1 — `_yf_history` construction must not raise, and must not repair
 # ---------------------------------------------------------------------------
@@ -171,7 +188,7 @@ class TestHistoryBoundary:
             ),
         }
         client = _client()
-        with patch.object(FMPClient, "_request_with_fallback", return_value=payload):
+        with _transport(payload):
             out = client.get_historical_prices("QQQ", days=3)
         assert out is not None
         dates = [b["date"] for b in out["historical"]]
@@ -196,10 +213,7 @@ class TestHistoryBoundary:
             ),
         }
         client = _client()
-        with (
-            patch.object(FMPClient, "_request_with_fallback", return_value=payload),
-            patch.object(fc, "_yf_history", return_value=None),
-        ):
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
             assert client.get_historical_prices("QQQ", days=3) is None
 
     def test_reject_stamps_no_provenance_and_caches_nothing(self):
@@ -210,10 +224,7 @@ class TestHistoryBoundary:
         """
         payload = {"symbol": "QQQ", "historical": _bars([("2026-08-18", NAN, 1_000)])}
         client = _client()
-        with (
-            patch.object(FMPClient, "_request_with_fallback", return_value=payload),
-            patch.object(fc, "_yf_history", return_value=None),
-        ):
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
             assert client.get_historical_prices("QQQ", days=1) is None
         assert client.cache == {}
         assert "historical:QQQ" not in client.data_sources
@@ -228,7 +239,7 @@ class TestHistoryBoundary:
             "historical": _bars([("2026-08-18", bad, 1_000), ("2026-08-17", 101.0, 1_000)]),
         }
         client = _client()
-        with patch.object(FMPClient, "_request_with_fallback", return_value=payload):
+        with _transport(payload):
             out = client.get_historical_prices("QQQ", days=2)
         assert out is not None
         assert [b["date"] for b in out["historical"]] == ["2026-08-17"]
@@ -237,10 +248,7 @@ class TestHistoryBoundary:
         """The fallback provider is validated by the same predicate, not a second copy."""
         client = _client()
         rows = _yf_rows([("2026-08-14", 100.0, 1_000), ("2026-08-17", 101.0, NAN)])
-        with (
-            patch.object(FMPClient, "_request_with_fallback", return_value=None),
-            _with_yf(rows),
-        ):
+        with _transport(None), _with_yf(rows):
             out = client.get_historical_prices("QQQ", days=2)
         assert out is not None
         assert [b["date"] for b in out["historical"]] == ["2026-08-14"]
@@ -282,10 +290,7 @@ class TestDateOrderingInvariant:
             ],
         }
         client = _client()
-        with (
-            patch.object(FMPClient, "_request_with_fallback", return_value=payload),
-            patch.object(fc, "_yf_history", return_value=None),
-        ):
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
             assert client.get_historical_prices("QQQ", days=3) is None
 
 
@@ -316,10 +321,7 @@ class TestQuoteBoundary:
         MUTANT: validate history only -> this fails while everything else passes.
         """
         client = _client()
-        with (
-            patch.object(FMPClient, "_request_with_fallback", return_value=[{"symbol": "QQQ", "price": bad}]),
-            patch.object(fc, "_yf_quote", return_value=None),
-        ):
+        with _transport([{"symbol": "QQQ", "price": bad}]), patch.object(fc, "_yf_quote", return_value=None):
             assert client.get_quote("QQQ") is None
         assert client.cache == {}
         assert "quote:QQQ" not in client.data_sources
@@ -329,11 +331,7 @@ class TestQuoteBoundary:
         not need — its own copy of the predicate (P7)."""
         client = _client()
         with (
-            patch.object(
-                FMPClient,
-                "_request_with_fallback",
-                return_value=[{"symbol": "QQQ", "price": NAN}, {"symbol": "SPY", "price": 500.0}],
-            ),
+            _transport([{"symbol": "QQQ", "price": NAN}, {"symbol": "SPY", "price": 500.0}]),
             patch.object(fc, "_yf_quote", return_value=None),
         ):
             out = client.get_batch_quotes(["QQQ", "SPY"])
@@ -366,7 +364,7 @@ class TestIncidentShape:
         payload = {"symbol": "QQQ", "historical": _bars([("2026-07-08", NAN, 3_000_000)] + specs)}
 
         client = _client()
-        with patch.object(FMPClient, "_request_with_fallback", return_value=payload):
+        with _transport(payload):
             out = client.get_historical_prices("QQQ", days=40)
 
         assert out is not None, "a trailing unsettled bar must not blank the symbol"
@@ -381,3 +379,64 @@ class TestIncidentShape:
         gain = ftd.get("gain_pct")
         assert gain is None or math.isfinite(gain), f"FTD scored off a non-finite gain: {gain!r}"
         assert state.get("current_price") is None or math.isfinite(state["current_price"])
+
+
+# ---------------------------------------------------------------------------
+# codex gate r1 — the two regressions the first implementation shipped
+# ---------------------------------------------------------------------------
+class TestOrderIsProvenBeforeTrimming:
+    """A discarded PREFIX bar can be chronologically interior.
+
+    Checking order only on the surviving tail passes an invalid `2026-08-16`
+    sitting ahead of a valid `08-18 / 08-17 / 08-15`: the remainder descends
+    cleanly, but the session dropped from between 08-17 and 08-15 is exactly the
+    false adjacency the guard exists to prevent.
+    """
+
+    def test_invalid_prefix_bar_out_of_order_rejects_the_payload(self):
+        payload = {
+            "symbol": "QQQ",
+            "historical": _bars(
+                [
+                    ("2026-08-16", NAN, 1_000),  # invalid AND chronologically interior
+                    ("2026-08-18", 102.0, 1_000),
+                    ("2026-08-17", 101.0, 1_000),
+                    ("2026-08-15", 100.0, 1_000),
+                ]
+            ),
+        }
+        client = _client()
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
+            assert client.get_historical_prices("QQQ", days=4) is None
+
+
+class TestContentFailureStillTriesTheNextEndpoint:
+    """A shape-valid but untrustworthy stable response is a FAILED ENDPOINT.
+
+    Validating in the public wrapper instead of the endpoint loop skipped v3 and
+    went straight to yfinance — turning a recoverable response into missing
+    history whenever yfinance was unavailable.
+    """
+
+    def test_bad_stable_history_falls_back_to_v3_not_yfinance(self):
+        bad = {"symbol": "QQQ", "historical": _bars([("2026-08-18", NAN, 1_000)])}
+        good = {
+            "symbol": "QQQ",
+            "historical": _bars([("2026-08-18", 102.0, 1_000), ("2026-08-17", 101.0, 1_000)]),
+        }
+        client = _client()
+        with _transport(bad, good), patch.object(fc, "_yf_history", return_value=None):
+            out = client.get_historical_prices("QQQ", days=2)
+        assert out is not None, "v3 was never tried"
+        assert [b["date"] for b in out["historical"]] == ["2026-08-18", "2026-08-17"]
+        assert client.data_sources["historical:QQQ"] == "fmp"
+
+    def test_bad_stable_quote_falls_back_to_v3_not_yfinance(self):
+        client = _client()
+        with (
+            _transport([{"symbol": "QQQ", "price": NAN}], [{"symbol": "QQQ", "price": 450.0}]),
+            patch.object(fc, "_yf_quote", return_value=None),
+        ):
+            out = client.get_quote("QQQ")
+        assert out == [{"symbol": "QQQ", "price": 450.0}]
+        assert client.data_sources["quote:QQQ"] == "fmp"

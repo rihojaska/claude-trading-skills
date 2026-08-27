@@ -7,6 +7,7 @@ Generates JSON and Markdown reports for FTD detection analysis.
 
 import json
 import os
+import sys
 import tempfile
 
 
@@ -60,9 +61,32 @@ def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
     """
     json_text = render_json_report(analysis)
     md_text = render_markdown_report(analysis)
+
+    # Rendering both first is not enough: if the SECOND `os.replace` fails, the
+    # first is already installed and `promote_pulse_latest.py` will publish a
+    # dated JSON from a run that failed (codex gate r1). Roll the first write
+    # back — and only when we created it, since a pre-existing file cannot be
+    # restored and silently deleting someone else's artifact would be worse than
+    # the half-pair. Timestamped filenames mean the rollback path is the norm.
+    json_existed = os.path.exists(json_file)
     _atomic_write_text(json_file, json_text)
+    try:
+        _atomic_write_text(md_file, md_text)
+    except BaseException:
+        if not json_existed:
+            try:
+                os.unlink(json_file)
+            except OSError:
+                print(
+                    f"  WARNING: could not roll back {json_file} after a Markdown "
+                    "write failure — a partial pack may be promotable.",
+                    file=sys.stderr,
+                )
+        raise
+
+    # Printed only once BOTH artifacts are on disk: announcing the JSON between
+    # the two writes made the output lie whenever the second one failed.
     print(f"  JSON report saved to: {json_file}")
-    _atomic_write_text(md_file, md_text)
     print(f"  Markdown report saved to: {md_file}")
 
 

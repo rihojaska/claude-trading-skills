@@ -127,3 +127,52 @@ class TestAtomicWrite:
             with pytest.raises(OSError):
                 rg._atomic_write_text(str(target), '{"new": true}')
         assert json.loads(target.read_text()) == {"previous": True}
+
+
+class TestSecondWriteRollback:
+    """codex gate r1: rendering both before writing either is not enough.
+
+    A failure in the SECOND `os.replace` leaves the first artifact installed, and
+    `promote_pulse_latest.py` globs dated sources — so a run that failed gets
+    published anyway.
+    """
+
+    def test_markdown_write_failure_removes_the_json_it_just_wrote(self, tmp_path):
+        j = tmp_path / "ftd_detector_2026-08-27_090000.json"
+        m = tmp_path / "ftd_detector_2026-08-27_090000.md"
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the Markdown replace, AFTER the JSON landed
+                raise OSError("disk full")
+            return real_replace(src, dst)
+
+        with patch("report_generator.os.replace", side_effect=flaky):
+            with pytest.raises(OSError):
+                rg.write_reports(_analysis(), str(j), str(m))
+        assert calls["n"] == 2, "the JSON write must actually have happened first"
+        assert not j.exists(), "a failed run left a promotable JSON on disk"
+        assert not m.exists()
+        assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+    def test_a_pre_existing_json_is_never_deleted(self, tmp_path):
+        """Rollback only removes a file we created. Deleting someone else's
+        artifact would be a worse failure than the half-pair it repairs."""
+        j = tmp_path / "ftd_detector_2026-08-27_090000.json"
+        m = tmp_path / "ftd_detector_2026-08-27_090000.md"
+        j.write_text('{"previous": true}')
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return real_replace(src, dst)
+
+        with patch("report_generator.os.replace", side_effect=flaky):
+            with pytest.raises(OSError):
+                rg.write_reports(_analysis(), str(j), str(m))
+        assert j.exists()
