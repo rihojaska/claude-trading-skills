@@ -445,9 +445,17 @@ class TestOrderIsProvenBeforeTrimming:
 class TestContentFailureStillTriesTheNextEndpoint:
     """A shape-valid but untrustworthy stable response is a FAILED ENDPOINT.
 
-    Validating in the public wrapper instead of the endpoint loop skipped v3 and
-    went straight to yfinance — turning a recoverable response into missing
-    history whenever yfinance was unavailable.
+    Validating in the public wrapper instead of the endpoint loop skipped the
+    rest of the endpoint list and went straight to yfinance.
+
+    Scope of the claim: these tests mock `_rate_limited_get`, so they pin the
+    LOOP's ordering — the next endpoint is tried before the yfinance fallback —
+    and nothing about the two endpoints hitting distinct upstreams. In this
+    deployment they do not: `fmp_compat` rewrites `/api/v3/...` back to
+    `/stable/...`, so the second attempt re-queries the first (pre-existing,
+    filed as WPP-20260827-012, found by codex gate r5). The ordering is still
+    the correct contract, and it is what makes the code right for any endpoint
+    pair that is not rewritten.
     """
 
     def test_bad_stable_history_falls_back_to_v3_not_yfinance(self):
