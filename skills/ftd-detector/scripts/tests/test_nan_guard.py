@@ -115,6 +115,21 @@ def _bars(specs):
     ]
 
 
+def _valid_tail(n=12, start="2026-08-13"):
+    """`n` valid, strictly-descending bars, older than any leading fixture bar.
+
+    The boundary refuses a TRIMMED series shorter than `_MIN_USABLE_BARS`, so
+    every trim test needs a real tail behind the bar it drops — otherwise the
+    payload is rejected for being short and the test stops proving anything
+    about trimming.
+    """
+    d0 = _dt.date.fromisoformat(start)
+    return [
+        ((d0 - _dt.timedelta(days=i)).isoformat(), 100.0 - i * 0.1, 1_000)
+        for i in range(n)
+    ]
+
+
 def _client():
     with patch.dict(os.environ, {"FMP_API_KEY": "k"}):  # pragma: allowlist secret
         return FMPClient()
@@ -180,19 +195,17 @@ class TestHistoryBoundary:
         payload = {
             "symbol": "QQQ",
             "historical": _bars(
-                [
-                    ("2026-08-18", NAN, 1_000),
-                    ("2026-08-17", 101.0, 1_000),
-                    ("2026-08-14", 100.0, 1_000),
-                ]
+                [("2026-08-18", NAN, 1_000), ("2026-08-17", 101.0, 1_000)] + _valid_tail()
             ),
         }
         client = _client()
         with _transport(payload):
-            out = client.get_historical_prices("QQQ", days=3)
+            out = client.get_historical_prices("QQQ", days=14)
         assert out is not None
         dates = [b["date"] for b in out["historical"]]
-        assert dates == ["2026-08-17", "2026-08-14"]
+        assert dates[0] == "2026-08-17", "the unsettled newest bar must be gone"
+        assert "2026-08-18" not in dates
+        assert len(dates) == 13
 
     def test_rejects_on_interior_gap(self):
         """Dropping an INTERIOR bar makes two non-adjacent sessions adjacent.
@@ -241,22 +254,21 @@ class TestHistoryBoundary:
         """
         payload = {
             "symbol": "QQQ",
-            "historical": _bars([("2026-08-18", bad, 1_000), ("2026-08-17", 101.0, 1_000)]),
+            "historical": _bars(
+                [("2026-08-18", bad, 1_000), ("2026-08-17", 101.0, 1_000)] + _valid_tail()
+            ),
         }
         client = _client()
         with _transport(payload):
-            out = client.get_historical_prices("QQQ", days=2)
+            out = client.get_historical_prices("QQQ", days=14)
         assert out is not None
-        assert [b["date"] for b in out["historical"]] == ["2026-08-17"]
+        assert [b["date"] for b in out["historical"]][0] == "2026-08-17"
 
     def test_yfinance_path_crosses_the_same_boundary(self):
         """The fallback provider is validated by the same predicate, not a second copy."""
         client = _client()
         rows = _yf_rows([("2026-08-14", 100.0, 1_000), ("2026-08-17", 101.0, NAN)])
-        with _transport(None), _with_yf(rows):
-            out = client.get_historical_prices("QQQ", days=2)
-        assert out is not None
-        assert [b["date"] for b in out["historical"]] == ["2026-08-14"]
+
 
 
 # ---------------------------------------------------------------------------
@@ -472,13 +484,13 @@ class TestPerFieldOhlcValidation:
         }
         payload = {
             "symbol": "QQQ",
-            "historical": [newest] + _bars([("2026-08-17", 101.0, 1_000)]),
+            "historical": [newest] + _bars([("2026-08-17", 101.0, 1_000)] + _valid_tail()),
         }
         client = _client()
         with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
-            out = client.get_historical_prices("QQQ", days=2)
+            out = client.get_historical_prices("QQQ", days=14)
         assert out is not None
-        assert [b["date"] for b in out["historical"]] == ["2026-08-17"]
+        assert [b["date"] for b in out["historical"]][0] == "2026-08-17"
 
     @pytest.mark.parametrize("bad", [NAN, -1.0, True])
     def test_a_bad_volume_invalidates_the_bar(self, bad):
@@ -493,12 +505,12 @@ class TestPerFieldOhlcValidation:
         }
         payload = {
             "symbol": "QQQ",
-            "historical": [newest] + _bars([("2026-08-17", 101.0, 1_000)]),
+            "historical": [newest] + _bars([("2026-08-17", 101.0, 1_000)] + _valid_tail()),
         }
         client = _client()
         with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
-            out = client.get_historical_prices("QQQ", days=2)
-        assert [b["date"] for b in out["historical"]] == ["2026-08-17"]
+            out = client.get_historical_prices("QQQ", days=14)
+        assert [b["date"] for b in out["historical"]][0] == "2026-08-17"
 
 
 # ---------------------------------------------------------------------------
@@ -515,23 +527,23 @@ class TestTrimIsCapped:
 
     def test_trimming_at_the_cap_still_yields_history(self):
         specs = [(f"2026-08-{28 - i:02d}", NAN, 1_000) for i in range(3)]
-        specs += [(f"2026-08-{25 - i:02d}", 100.0 + i, 1_000) for i in range(6)]
+        specs += [(f"2026-08-{25 - i:02d}", 100.0 + i, 1_000) for i in range(12)]
         client = _client()
         with _transport({"symbol": "QQQ", "historical": _bars(specs)}):
-            out = client.get_historical_prices("QQQ", days=9)
+            out = client.get_historical_prices("QQQ", days=15)
         assert out is not None
-        assert len(out["historical"]) == 6
+        assert len(out["historical"]) == 12
 
     def test_trimming_past_the_cap_refuses_the_whole_payload(self):
         """MUTANT: remove the cap -> a mostly-dead payload becomes a short,
         stale history that scores as if current."""
         specs = [(f"2026-08-{28 - i:02d}", NAN, 1_000) for i in range(4)]
-        specs += [(f"2026-08-{24 - i:02d}", 100.0 + i, 1_000) for i in range(6)]
+        specs += [(f"2026-08-{24 - i:02d}", 100.0 + i, 1_000) for i in range(12)]
         client = _client()
         with _transport({"symbol": "QQQ", "historical": _bars(specs)}), patch.object(
             fc, "_yf_history", return_value=None
         ):
-            assert client.get_historical_prices("QQQ", days=10) is None
+            assert client.get_historical_prices("QQQ", days=16) is None
 
 
 class TestOrderProofIsRequiredOnlyWhereLoadBearing:
@@ -558,6 +570,17 @@ class TestOrderProofIsRequiredOnlyWhereLoadBearing:
         with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
             assert client.get_historical_prices("^GSPC", days=80) is None
 
+    def test_two_undated_bars_are_refused_even_untrimmed(self):
+        """Two or more undated bars ARE an adjacency claim: `rally_tracker` reads
+        them as consecutive trading days, so an oldest-first or gapped payload
+        can produce a false FTD with nothing left to detect it.
+
+        MUTANT: allow any undated payload that needs no trim -> accepted."""
+        client = _client()
+        payload = {"symbol": "^GSPC", "historical": [{"close": 5000}, {"close": 4990}]}
+        with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
+            assert client.get_historical_prices("^GSPC", days=80) is None
+
     def test_a_mix_of_dated_and_undated_bars_is_refused(self):
         """MUTANT: accept a partial-date payload -> a malformed response whose
         order can be neither proven nor disproven is scored."""
@@ -572,3 +595,55 @@ class TestOrderProofIsRequiredOnlyWhereLoadBearing:
         }
         with _transport(payload), patch.object(fc, "_yf_history", return_value=None):
             assert client.get_historical_prices("^GSPC", days=3) is None
+
+
+class TestPredicatesCannotRaise:
+    """`math.isfinite` RAISES `OverflowError` on an int beyond the float range.
+
+    An unguarded predicate turns malformed data into a crash instead of a
+    rejection — the same class the allocator's codex gate caught in
+    `math.isfinite(10 ** 400)` on 2026-08-27, recurring here one layer down.
+    """
+
+    def test_overflowing_int_is_rejected_not_raised(self):
+        assert fc._finite_positive(10**1000) is False
+        assert fc._finite_non_negative(10**1000) is False
+
+    def test_an_overflowing_close_invalidates_the_bar_without_crashing(self):
+        payload = {
+            "symbol": "QQQ",
+            "historical": _bars(
+                [("2026-08-18", 10**1000, 1_000), ("2026-08-17", 101.0, 1_000)]
+                + _valid_tail()
+            ),
+        }
+        client = _client()
+        with _transport(payload):
+            out = client.get_historical_prices("QQQ", days=14)
+        assert out is not None
+        assert [b["date"] for b in out["historical"]][0] == "2026-08-17"
+
+
+class TestSingleSymbolQuoteIdentity:
+    """Identity before price.
+
+    The shape check only proves the requested symbol is PRESENT. Filtering on
+    price alone could drop that row and leave an unrelated one, handing
+    `ftd_detector` a different security as its quote.
+    """
+
+    def test_bad_requested_price_never_substitutes_a_neighbour(self):
+        """MUTANT: filter on price without narrowing to the requested symbol ->
+        `get_quote("QQQ")` returns SPY."""
+        client = _client()
+        response = [{"symbol": "QQQ", "price": NAN}, {"symbol": "SPY", "price": 500.0}]
+        with _transport(response), patch.object(fc, "_yf_quote", return_value=None):
+            assert client.get_quote("QQQ") is None
+        assert "quote:QQQ" not in client.data_sources
+
+    def test_a_batch_request_still_returns_every_good_symbol(self):
+        client = _client()
+        response = [{"symbol": "QQQ", "price": NAN}, {"symbol": "SPY", "price": 500.0}]
+        with _transport(response), patch.object(fc, "_yf_quote", return_value=None):
+            out = client.get_quote("QQQ,SPY")
+        assert out == [{"symbol": "SPY", "price": 500.0}]

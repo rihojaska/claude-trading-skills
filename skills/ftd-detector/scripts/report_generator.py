@@ -48,10 +48,26 @@ def _encode_unserializable(value):
     # Duck-typed rather than `isinstance(value, numbers.Real)`: `Decimal` is a
     # `numbers.Number` but NOT a `numbers.Real`, so a registry check would have
     # missed `Decimal("NaN")` — the very case that motivated this function.
-    # Anything float-able is judged; anything else keeps the old `str` behaviour.
+    #
+    # `is_finite()` is consulted FIRST because `float(Decimal("sNaN"))` raises
+    # ValueError, which the conversion arm below cannot distinguish from "this
+    # type simply is not numeric" — a signalling NaN would have been stringified
+    # to "sNaN" and passed `allow_nan=False` (codex gate r3).
+    is_finite = getattr(value, "is_finite", None)
+    if callable(is_finite):
+        try:
+            finite = bool(is_finite())
+        except Exception:
+            finite = False
+        if not finite:
+            raise ValueError(
+                f"Out of range float values are not JSON compliant: {value!r}"
+            )
+        return str(value)
+
     try:
         as_float = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
     else:
         if not math.isfinite(as_float):
@@ -101,8 +117,12 @@ def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
     # back — and only when we created it, since a pre-existing file cannot be
     # restored and silently deleting someone else's artifact would be worse than
     # the half-pair. Timestamped filenames mean the rollback path is the norm.
+    # Existence and readability are tracked SEPARATELY. Collapsing them let an
+    # existing-but-unreadable report look absent, so the rollback below took the
+    # `unlink` branch and DELETED the prior evidence (codex gate r3).
+    json_existed = os.path.exists(json_file)
     previous_json = None
-    if os.path.exists(json_file):
+    if json_existed:
         try:
             with open(json_file, "rb") as handle:
                 previous_json = handle.read()
@@ -118,11 +138,20 @@ def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
         # `promote_pulse_latest.py` to select (codex gate r2), so the prior bytes
         # are captured up front and put back.
         try:
-            if previous_json is None:
-                os.unlink(json_file)
-            else:
+            if previous_json is not None:
                 with open(json_file, "wb") as handle:
                     handle.write(previous_json)
+            elif not json_existed:
+                os.unlink(json_file)
+            else:
+                # It existed but could not be read, so there is nothing to
+                # restore and deleting it would destroy evidence we never saw.
+                # Fail closed: leave the file and say so loudly.
+                print(
+                    f"  WARNING: {json_file} pre-existed but was unreadable; it now "
+                    "holds a failed run's output and could not be restored.",
+                    file=sys.stderr,
+                )
         except OSError:
             print(
                 f"  WARNING: could not roll back {json_file} after a Markdown "

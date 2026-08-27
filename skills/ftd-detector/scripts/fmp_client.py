@@ -140,18 +140,31 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
 # non-adjacent bars adjacent.
 
 
-def _finite_positive(value) -> bool:
-    """True for a real, finite, strictly positive number. `bool` is not a price."""
+def _finite(value) -> bool:
+    """True for a real, finite number. `bool` is not a price.
+
+    `math.isfinite` RAISES `OverflowError` on a Python int beyond the float range
+    (`10 ** 1000`), so an unguarded call turns malformed data into a crash instead
+    of a rejection — the same class the allocator's codex gate caught in
+    `math.isfinite(10 ** 400)` on 2026-08-27. A predicate that can raise is not a
+    predicate.
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return math.isfinite(value) and value > 0
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _finite_positive(value) -> bool:
+    """True for a real, finite, strictly positive number."""
+    return _finite(value) and value > 0
 
 
 def _finite_non_negative(value) -> bool:
     """True for a real, finite, non-negative number (volume may legitimately be 0)."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    return math.isfinite(value) and value >= 0
+    return _finite(value) and value >= 0
 
 
 _PRICE_FIELDS = ("open", "high", "low", "adjClose")
@@ -162,6 +175,10 @@ _PRICE_FIELDS = ("open", "high", "low", "adjClose")
 # rows across a holiday stretch. Beyond that it is an outage, not an unsettled
 # bar, and the honest answer is no history rather than a truncated one.
 _MAX_LEADING_TRIM = 3
+
+# The shortest series worth returning after a trim — `rally_tracker`'s own floor
+# (`analyze_single_index` refuses a history below this length).
+_MIN_USABLE_BARS = 10
 
 
 def _bar_is_valid(bar) -> bool:
@@ -245,12 +262,17 @@ def _validate_history(payload):
     # 08-15 (codex gate r1). Descending order is what makes "leading == newest"
     # true, so it must hold before trimming means anything.
     #
-    # But it is required only WHERE IT IS LOAD-BEARING. A payload that carries no
-    # dates at all and needs no trim asserts no adjacency, and FMP's v3 shape is
-    # legitimately minimal — demanding a `date` on every bar rejected valid
-    # responses and broke the symbol-mismatch fallback (codex gate r2). So: all
-    # bars dated -> prove the order; none dated and nothing trimmed -> accept;
-    # anything in between, or any trim without provable order -> refuse.
+    # But it is required only WHERE IT IS LOAD-BEARING. Demanding a `date` on
+    # every bar rejected FMP's legitimately minimal v3 shape and broke the
+    # symbol-mismatch fallback (codex gate r2). The exception is sound for ONE
+    # undated bar and no other count: a single observation asserts no adjacency,
+    # whereas two or more undated bars are handed to `rally_tracker` as
+    # consecutive trading days, so an oldest-first or gapped payload can produce
+    # a false FTD with nothing to detect it (codex gate r3).
+    #
+    # all bars dated          -> prove strictly descending
+    # exactly one bar, undated, untrimmed -> accept, nothing is asserted
+    # anything else           -> refuse
     parsed = [_bar_date(bar) for bar in bars]
     dated = [d is not None for d in parsed]
     if all(dated):
@@ -259,11 +281,20 @@ def _validate_history(payload):
             if previous is not None and current >= previous:
                 return None
             previous = current
-    elif any(dated) or first_valid > 0:
+    elif any(dated) or first_valid > 0 or len(bars) > 1:
         return None
 
     kept = bars[first_valid:]
     if not all(_bar_is_valid(bar) for bar in kept):
+        return None
+
+    # A trim must not manufacture a series too short to mean anything.
+    # `ftd_detector.main` derives `decision_grade` from truthiness, so a two-bar
+    # tail would be labelled decision-grade and its score consumed by
+    # exposure-coach at full weight, even though `analyze_single_index` refuses
+    # to analyse it (codex gate r3). Applied only WHEN a trim occurred: a natively
+    # short payload behaves exactly as it did before this change.
+    if first_valid > 0 and len(kept) < _MIN_USABLE_BARS:
         return None
 
     if first_valid == 0:
@@ -304,7 +335,7 @@ def _yf_history(symbol: str, days: int) -> Optional[dict]:
             value = row.get(fallback_key)
         try:
             return float(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
 
     rows = []
@@ -526,10 +557,23 @@ class FMPClient:
                     else:
                         data = validated
                 elif endpoint_key == "quote":
+                    candidates = [q for q in data if isinstance(q, dict)]
+                    if is_single:
+                        # Identity before price. The shape check above only proves
+                        # the requested symbol is PRESENT; filtering on price alone
+                        # could drop that row and leave an unrelated one, handing
+                        # `ftd_detector` a different security as its quote
+                        # (codex gate r3). Narrow to the requested symbol first, so
+                        # an invalid price fails the endpoint rather than
+                        # substituting a neighbour.
+                        norm = symbols_str.replace("-", ".")
+                        candidates = [
+                            q
+                            for q in candidates
+                            if (q.get("symbol") or symbols_str).replace("-", ".") == norm
+                        ]
                     kept_quotes = [
-                        q
-                        for q in data
-                        if isinstance(q, dict) and _finite_positive(q.get("price"))
+                        q for q in candidates if _finite_positive(q.get("price"))
                     ]
                     if not kept_quotes:
                         valid = False

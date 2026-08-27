@@ -212,3 +212,62 @@ class TestDefaultEncoderIsNotAnEscapeHatch:
 
         text = rg.render_json_report(_analysis(qqq=Decimal("450.25")))
         assert _strict_load(text)["metadata"]["index_prices"]["qqq"] == "450.25"
+
+
+class TestSignallingNaN:
+    """`float(Decimal("sNaN"))` raises ValueError.
+
+    The conversion arm cannot tell that apart from "this type is not numeric",
+    so a signalling NaN was stringified to "sNaN" and sailed past
+    `allow_nan=False` as valid JSON — the escape hatch, one layer deeper.
+    """
+
+    def test_signalling_nan_is_refused(self):
+        from decimal import Decimal
+
+        with pytest.raises(ValueError):
+            rg.render_json_report(_analysis(qqq=Decimal("sNaN")))
+
+    def test_a_non_numeric_object_still_stringifies(self):
+        """MUTANT: reject everything float() cannot convert -> this breaks."""
+
+        class Thing:
+            def __str__(self):
+                return "a-thing"
+
+        text = rg.render_json_report(_analysis(qqq=Thing()))
+        assert _strict_load(text)["metadata"]["index_prices"]["qqq"] == "a-thing"
+
+
+class TestUnreadablePreExistingJson:
+    """Existence and readability are different facts.
+
+    Collapsing them let an existing-but-unreadable report look absent, so
+    rollback deleted prior evidence nobody had read.
+    """
+
+    def test_unreadable_pre_existing_json_is_not_deleted(self, tmp_path):
+        j = tmp_path / "ftd_detector_2026-08-27_090000.json"
+        m = tmp_path / "ftd_detector_2026-08-27_090000.md"
+        j.write_text('{"previous": true}')
+        real_replace, real_open = os.replace, open
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("disk full")
+            return real_replace(src, dst)
+
+        def unreadable(path, mode="r", *a, **kw):
+            if str(path) == str(j) and "rb" in mode:
+                raise OSError("permission denied")
+            return real_open(path, mode, *a, **kw)
+
+        with (
+            patch("report_generator.os.replace", side_effect=flaky),
+            patch("report_generator.open", side_effect=unreadable, create=True),
+        ):
+            with pytest.raises(OSError):
+                rg.write_reports(_analysis(), str(j), str(m))
+        assert j.exists(), "an unreadable pre-existing report must never be deleted"
