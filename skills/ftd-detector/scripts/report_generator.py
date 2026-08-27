@@ -77,6 +77,20 @@ def _encode_unserializable(value):
     return str(value)
 
 
+def _atomic_write_bytes(output_file: str, payload: bytes) -> None:
+    """Byte-exact atomic write — used to restore a prior artifact on rollback."""
+    directory = os.path.dirname(os.path.abspath(output_file)) or "."
+    fd, tmp = tempfile.mkstemp(dir=directory, suffix=".partial")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+        os.replace(tmp, output_file)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
 def _atomic_write_text(output_file: str, text: str) -> None:
     """Write via temp file + `os.replace` — the house idiom.
 
@@ -117,17 +131,21 @@ def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
     # back — and only when we created it, since a pre-existing file cannot be
     # restored and silently deleting someone else's artifact would be worse than
     # the half-pair. Timestamped filenames mean the rollback path is the norm.
-    # Existence and readability are tracked SEPARATELY. Collapsing them let an
-    # existing-but-unreadable report look absent, so the rollback below took the
-    # `unlink` branch and DELETED the prior evidence (codex gate r3).
-    json_existed = os.path.exists(json_file)
+    # A target that cannot be backed up cannot be rolled back, so it is not
+    # overwritten at all. Leaving it replaced meant a FAILED run's JSON sat where
+    # the prior report had been — and `promote_pulse_latest.py` selects dated JSON
+    # files without requiring a Markdown companion, so it was promotable
+    # (codex gate r3 found the deletion, r4 the promotable remainder).
     previous_json = None
-    if json_existed:
+    if os.path.exists(json_file):
         try:
             with open(json_file, "rb") as handle:
                 previous_json = handle.read()
-        except OSError:
-            previous_json = None
+        except OSError as exc:
+            raise OSError(
+                f"refusing to overwrite {json_file}: it exists but could not be read, "
+                "so a failed write could not be rolled back"
+            ) from exc
 
     _atomic_write_text(json_file, json_text)
     try:
@@ -138,20 +156,14 @@ def write_reports(analysis: dict, json_file: str, md_file: str) -> None:
         # `promote_pulse_latest.py` to select (codex gate r2), so the prior bytes
         # are captured up front and put back.
         try:
-            if previous_json is not None:
-                with open(json_file, "wb") as handle:
-                    handle.write(previous_json)
-            elif not json_existed:
+            if previous_json is None:
                 os.unlink(json_file)
             else:
-                # It existed but could not be read, so there is nothing to
-                # restore and deleting it would destroy evidence we never saw.
-                # Fail closed: leave the file and say so loudly.
-                print(
-                    f"  WARNING: {json_file} pre-existed but was unreadable; it now "
-                    "holds a failed run's output and could not be restored.",
-                    file=sys.stderr,
-                )
+                # Restored the same way it was written: an in-place `open("wb")`
+                # truncates first, so a failure mid-write would leave a PARTIAL
+                # prior report — repairing a half-pair by corrupting the artifact
+                # it was meant to preserve.
+                _atomic_write_bytes(json_file, previous_json)
         except OSError:
             print(
                 f"  WARNING: could not roll back {json_file} after a Markdown "

@@ -246,7 +246,7 @@ class TestUnreadablePreExistingJson:
     rollback deleted prior evidence nobody had read.
     """
 
-    def test_unreadable_pre_existing_json_is_not_deleted(self, tmp_path):
+    def test_unreadable_pre_existing_json_is_never_overwritten(self, tmp_path):
         j = tmp_path / "ftd_detector_2026-08-27_090000.json"
         m = tmp_path / "ftd_detector_2026-08-27_090000.md"
         j.write_text('{"previous": true}')
@@ -264,10 +264,50 @@ class TestUnreadablePreExistingJson:
                 raise OSError("permission denied")
             return real_open(path, mode, *a, **kw)
 
+        # `patch.object(rg, ...)` and not `patch("report_generator.open", ...)`:
+        # sibling conftests evict and re-import these modules between skill
+        # suites, so the dotted form can target a DIFFERENT module object than
+        # the `rg` this test calls into — the patch then silently does nothing
+        # and the test passes for the wrong reason. (`os.replace` is immune
+        # because that form patches the shared `os` module itself.)
         with (
             patch("report_generator.os.replace", side_effect=flaky),
-            patch("report_generator.open", side_effect=unreadable, create=True),
+            patch.object(rg, "open", side_effect=unreadable, create=True),
         ):
             with pytest.raises(OSError):
                 rg.write_reports(_analysis(), str(j), str(m))
         assert j.exists(), "an unreadable pre-existing report must never be deleted"
+        assert calls["n"] == 0, (
+            "a target that cannot be backed up must not be overwritten at all — "
+            "leaving a failed run's JSON there is promotable"
+        )
+        assert not m.exists()
+
+
+class TestRollbackRestoreIsAtomic:
+    """Repairing a half-pair must not corrupt the artifact it preserves.
+
+    An in-place `open(..., "wb")` truncates before writing, so a failure
+    mid-restore would leave a PARTIAL prior report.
+    """
+
+    def test_a_failed_restore_leaves_no_partial_prior_report(self, tmp_path):
+        j = tmp_path / "ftd_detector_2026-08-27_090000.json"
+        m = tmp_path / "ftd_detector_2026-08-27_090000.md"
+        j.write_text('{"previous": true}')
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky(src, dst):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the Markdown replace
+                raise OSError("disk full")
+            return real_replace(src, dst)
+
+        with patch("report_generator.os.replace", side_effect=flaky):
+            with pytest.raises(OSError):
+                rg.write_reports(_analysis(), str(j), str(m))
+        # Restore is a third os.replace, so the prior bytes arrive whole or not at all.
+        assert json.loads(j.read_text()) == {"previous": True}
+        assert not m.exists()
+        assert sorted(p.name for p in tmp_path.iterdir()) == [j.name]

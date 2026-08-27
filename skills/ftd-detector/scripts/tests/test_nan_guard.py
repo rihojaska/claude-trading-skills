@@ -265,10 +265,25 @@ class TestHistoryBoundary:
         assert [b["date"] for b in out["historical"]][0] == "2026-08-17"
 
     def test_yfinance_path_crosses_the_same_boundary(self):
-        """The fallback provider is validated by the same predicate, not a second copy."""
-        client = _client()
-        rows = _yf_rows([("2026-08-14", 100.0, 1_000), ("2026-08-17", 101.0, NAN)])
+        """The fallback provider is validated by the same predicate, not a second copy.
 
+        Driven through the PUBLIC method with the FMP transport dead, so the test
+        fails if `get_historical_prices` ever hands a yfinance payload back
+        without validating it. (An earlier revision of this test constructed its
+        fixtures and then asserted nothing — vacuous, and caught by the codex
+        gate rather than by the suite, which is the whole argument for the gate.)
+        """
+        client = _client()
+        chrono = [(d, c, v) for d, c, v in reversed(_valid_tail())]
+        rows = _yf_rows(chrono + [("2026-08-17", 101.0, NAN)])
+        with _transport(None), _with_yf(rows):
+            out = client.get_historical_prices("QQQ", days=13)
+        assert out is not None, "the yfinance fallback should still yield history"
+        dates = [b["date"] for b in out["historical"]]
+        assert "2026-08-17" not in dates, "the NaN-volume newest bar was not trimmed"
+        assert len(dates) == 12
+        assert all(isinstance(b["volume"], int) for b in out["historical"])
+        assert client.data_sources["historical:QQQ"] == "yfinance"
 
 
 # ---------------------------------------------------------------------------
