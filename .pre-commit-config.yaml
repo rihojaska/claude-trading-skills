@@ -183,3 +183,18 @@ repos:
         stages: [pre-push]
         pass_filenames: false
         always_run: true
+
+      - id: package-drift-full-pre-push
+        name: Full .skill package drift check (all skills, regardless of changed files)
+        entry: python3 scripts/package_skills.py --check
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+        # WPP-20260827-011: the commit-stage package hooks are file-triggered,
+        # so PRE-EXISTING drift (or drift introduced via a path outside their
+        # `files:` regexes, e.g. repo-root fmp_compat.py) can sit silent for
+        # weeks — 9 skills were stale for 5+ weeks and the stale
+        # market-top-detector package was implicated in the 2026-08-31 pulse
+        # outage. This gate is always_run at pre-push (~0.3s) so ANY drift
+        # blocks the next push no matter which files changed.

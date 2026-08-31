@@ -112,7 +112,10 @@ drift `--check`) then `bash scripts/run_all_tests.sh`.
 
 **Pre-push stage**: `validate-skills-index-strict`
 (`--strict-workflows --strict-metadata`) + `pytest-pre-push`
-(`scripts/run_all_tests.sh`).
+(`scripts/run_all_tests.sh`) + `package-drift-full-pre-push`
+(`package_skills.py --check`, always-run across ALL skills — the commit-stage
+package hooks are file-triggered, so pre-existing drift would otherwise sit
+silent; WPP-20260827-011).
 
 **CI** (`.github/workflows/ci.yml`): `Lint`, `Test`, `Security`, and
 `Metadata + Workflow checks` (runs the validators + every drift `--check`).
@@ -254,7 +257,11 @@ python3 scripts/package_skills.py --skill <skill-name>
 ```
 
 The packager excludes `tests/`, `__pycache__/`, Python bytecode, and `.DS_Store`
-files from distributable archives. The `skill-docs-drift` hook's `files:`
+files from distributable archives. Baseline rule for any skill-touching
+session: run `python3 scripts/package_skills.py --check` alongside
+`generate_fmp_client.py --check` and pytest — the `.skill` zips are a THIRD
+copy of the vendored clients that neither of those gates sees
+(WPP-20260827-011). The `skill-docs-drift` hook's `files:`
 includes `skill-packages/*.skill`, so a stale archive that feeds a
 generator-owned page surfaces as drift. Repackage, `git add` the `.skill`, and
 re-run `pre-commit run --all-files`.
