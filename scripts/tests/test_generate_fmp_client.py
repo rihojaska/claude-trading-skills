@@ -158,7 +158,7 @@ def test_special_templates_preserve_public_surface(gen):
         "def _has_usable_history(data) -> bool:",
         "from fmp_compat import fmp_get",
         "def get_historical_prices(self, symbol: str, days: int = 600)",
-        "def _get_from_yfinance(self, symbol: str, days: int)",
+        "def _history_values_ok(payload) -> bool:",
         "def get_batch_historical(self, symbols: list[str], days: int = 600)",
         "def get_treasury_rates(self, days: int = 600)",
         '"api_calls_made": self.api_calls_made',

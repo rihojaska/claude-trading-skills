@@ -572,9 +572,7 @@ class FMPClient:
                             for q in candidates
                             if (q.get("symbol") or symbols_str).replace("-", ".") == norm
                         ]
-                    kept_quotes = [
-                        q for q in candidates if _finite_positive(q.get("price"))
-                    ]
+                    kept_quotes = [q for q in candidates if _finite_positive(q.get("price"))]
                     if not kept_quotes:
                         valid = False
                         shape_issue = "no quote carried a real, positive price"

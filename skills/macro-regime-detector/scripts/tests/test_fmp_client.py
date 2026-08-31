@@ -181,7 +181,10 @@ class TestYFinanceFallback:
     @patch.object(FMPClient, "_request_with_fallback", return_value=None)
     def test_days_limit_applied(self, _mock_fmp):
         client = _make_client()
-        rows = [_row(f"2026-04-{d:02d}", 1, 2, 0, 1.0 + d, 10 * d) for d in range(1, 11)]
+        # low=0.5 not 0: the WPP-20260827-009 value boundary requires strictly
+        # positive prices, and this fixture's low is incidental to the
+        # days-limit behavior under test.
+        rows = [_row(f"2026-04-{d:02d}", 1, 2, 0.5, 1.0 + d, 10 * d) for d in range(1, 11)]
         fake_df = _FakeDF(rows)
         fake_yf = MagicMock()
         fake_yf.download.return_value = fake_df

@@ -12,6 +12,7 @@ Features:
 - Batch quote support for ETF baskets
 """
 
+import math
 import os
 import sys
 import time
@@ -122,13 +123,76 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
     return {"symbol": matched_symbol or symbols_str, "historical": historical}
 
 
+# --- WPP-20260827-009: value boundary for every provider (policy of WPP-20260818-009) ---
+#
+# `float(row["Close"])` passes NaN straight through — `bool(float("nan")) is
+# True` — and downstream, NaN fails EVERY comparison: distribution-day counting
+# compares closes and volumes positionally, and `_yf_quote` derives yearHigh via
+# `max()` over the window, where a NaN in the FIRST bar seeds `max` and yields
+# NaN while a later NaN is silently skipped — quietly wrong rather than visibly
+# broken. The rule, stated once: no missing or non-finite observation may be
+# converted into a value that reads as a valid one. Reject the whole fetch and
+# let the caller's existing degrade path run; never repair a field, never drop
+# a single bar (positional consumers would compare non-adjacent sessions).
+#
+# Date ORDER is not re-proven here: after the v3 sunset the only providers are
+# stable EOD (descending — verified live) and yfinance (built ascending, then
+# reversed below), both order-guaranteed by construction. This boundary
+# validates VALUES, all-or-none per fetch.
+
+
+def _finite(value) -> bool:
+    """True for a real, finite number. `bool` is not a price.
+
+    `math.isfinite` RAISES `OverflowError` on a Python int beyond float range,
+    so an unguarded call turns malformed data into a crash instead of a
+    rejection. A predicate that can raise is not a predicate.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _finite_positive(value) -> bool:
+    """True for a real, finite, strictly positive number."""
+    return _finite(value) and value > 0
+
+
+def _history_values_ok(payload) -> bool:
+    """All-or-none value check over a normalized ``historical`` payload.
+
+    Every bar must carry finite, strictly positive open/high/low/close and a
+    finite, non-negative volume. One bad bar rejects the whole payload —
+    positional consumers (distribution-day counting) must never see a spliced
+    series, and a substituted 0.0 would read as a valid observation.
+    """
+    if not isinstance(payload, dict):
+        return False
+    bars = payload.get("historical")
+    if not isinstance(bars, list) or not bars:
+        return False
+    for bar in bars:
+        if not isinstance(bar, dict):
+            return False
+        if not all(_finite_positive(bar.get(k)) for k in ("open", "high", "low", "close")):
+            return False
+        vol = bar.get("volume")
+        if not _finite(vol) or vol < 0:
+            return False
+    return True
+
+
 def _yf_history(symbol: str, days: int) -> Optional[dict]:
     """Fetch daily history via yfinance and normalize to FMP historical shape.
 
     Returns ``{"symbol": ..., "historical": [...]}`` with most-recent-first
     bars (date/open/high/low/close/adjClose/volume), or ``None`` on
     empty/error. ``yfinance`` is imported lazily so the FMP success path never
-    depends on it.
+    depends on it. Any bar with a non-finite price or volume rejects the WHOLE
+    fetch (WPP-20260827-009) — the caller's degrade path handles None.
     """
     try:
         import yfinance as yf
@@ -149,16 +213,33 @@ def _yf_history(symbol: str, days: int) -> Optional[dict]:
             df.columns = df.columns.droplevel(1)
         historical = []
         for idx, row in df.iterrows():
+            o = float(row["Open"])
+            h = float(row["High"])
+            low = float(row["Low"])
             close = float(row["Close"])
+            try:
+                vol = float(row["Volume"])
+            except (TypeError, ValueError):
+                vol = float("nan")
+            if not (
+                all(_finite_positive(v) for v in (o, h, low, close)) and _finite(vol) and vol >= 0
+            ):
+                print(
+                    f"WARNING: yfinance returned a non-finite bar for {symbol} "
+                    f"at {idx.strftime('%Y-%m-%d')}; rejecting the whole fetch "
+                    "(no repair, no trim — WPP-20260827-009)",
+                    file=sys.stderr,
+                )
+                return None
             historical.append(
                 {
                     "date": idx.strftime("%Y-%m-%d"),
-                    "open": float(row["Open"]),
-                    "high": float(row["High"]),
-                    "low": float(row["Low"]),
+                    "open": o,
+                    "high": h,
+                    "low": low,
                     "close": close,
                     "adjClose": close,  # auto_adjust=True -> Close already adjusted
-                    "volume": int(row["Volume"]),
+                    "volume": int(vol),
                 }
             )
         if not historical:
@@ -173,7 +254,11 @@ def _yf_history(symbol: str, days: int) -> Optional[dict]:
 def _yf_quote(symbol: str) -> Optional[dict]:
     """Quote-like record derived from recent yfinance daily bars (FMP quote shape).
 
-    Year high/low are approximated from ~252 daily bars.
+    Year high/low are approximated from ~252 daily bars. The `max()`/`min()`
+    below are NaN-safe by invariant: `_yf_history` validates every bar
+    all-or-none (WPP-20260827-009), so the window is either entirely finite or
+    this function never runs — the previous order-dependent-NaN failure mode
+    (NaN seeding `max` from bar 0, silently skipped later) is unreachable.
     """
     hist = _yf_history(symbol, 260)
     if not hist or not hist.get("historical"):
@@ -301,6 +386,18 @@ class FMPClient:
                     for q in data
                 ):
                     valid = False
+                else:
+                    # WPP-20260827-009 value boundary: a quote without a real,
+                    # positive price is not a quote. Quotes are independent
+                    # per-symbol records, so filtering (unlike bar-splicing in a
+                    # time series) removes nothing positional.
+                    kept_quotes = [
+                        q for q in data if isinstance(q, dict) and _finite_positive(q.get("price"))
+                    ]
+                    if not kept_quotes:
+                        valid = False
+                    else:
+                        data = kept_quotes
 
             if endpoint_key == "historical":
                 if not isinstance(data, dict):
@@ -316,7 +413,7 @@ class FMPClient:
                                 "historical": entry.get("historical", []),
                             }
                             break
-                    if found:
+                    if found and _history_values_ok(found):
                         self._endpoint_failures[base_url] = 0
                         return found
                     valid = False
@@ -325,6 +422,11 @@ class FMPClient:
                 elif is_single and data.get("symbol"):
                     if data["symbol"].replace("-", ".") != symbols_str.replace("-", "."):
                         valid = False
+                # WPP-20260827-009 value boundary: FMP JSON can carry bare NaN
+                # (json.loads accepts it) and _normalize_eod_flat_list copies
+                # row values verbatim — all-or-none, same rule as the yf path.
+                if valid and not _history_values_ok(data):
+                    valid = False
 
             if valid:
                 self._endpoint_failures[base_url] = 0

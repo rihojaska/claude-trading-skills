@@ -138,12 +138,15 @@ def test_macro_special_surface_and_stats(monkeypatch):
     assert hasattr(mod, "fmp_get")  # fmp_compat transport
     for method in (
         "get_historical_prices",
-        "_get_from_yfinance",
         "get_batch_historical",
         "get_treasury_rates",
         "get_api_stats",
     ):
         assert hasattr(mod.FMPClient, method)
+    # WPP-20260827-009: the dead `_get_from_yfinance` method was deleted —
+    # the live yf path is the module-level `_yf_history`.
+    assert not hasattr(mod.FMPClient, "_get_from_yfinance")
+    assert hasattr(mod, "_yf_history")
     client = mod.FMPClient(api_key="test_key")  # pragma: allowlist secret
     assert set(client.get_api_stats()) == {
         "cache_entries",

@@ -195,7 +195,7 @@ class TestEndpointFallback:
     def test_historical_fallback_to_v3(self):
         """Stable 403, v3 200 returns v3 data for historical."""
         client = self._make_client()
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
             if "stable" in url:
@@ -214,7 +214,7 @@ class TestEndpointFallback:
     def test_historical_stable_v3_format_passthrough(self):
         """Stable returns v3-compatible format {'historical': [...]} — returned as-is."""
         client = self._make_client()
-        data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
             return _mock_response(200, data)
@@ -230,7 +230,7 @@ class TestEndpointFallback:
             "historicalStockList": [
                 {
                     "symbol": "^GSPC",
-                    "historical": [{"date": "2026-03-20", "close": 5500.0}],
+                    "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}],
                 }
             ]
         }
@@ -242,7 +242,7 @@ class TestEndpointFallback:
         result = client.get_historical_prices("^GSPC", days=80)
         assert result is not None
         assert "historical" in result
-        assert result["historical"] == [{"date": "2026-03-20", "close": 5500.0}]
+        assert result["historical"] == [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]
 
     def test_historical_stable_batch_no_match_falls_back_to_v3(self):
         """Stable batch has wrong symbol, falls back to v3 which succeeds."""
@@ -251,11 +251,11 @@ class TestEndpointFallback:
             "historicalStockList": [
                 {
                     "symbol": "SPY",
-                    "historical": [{"date": "2026-03-20", "close": 550.0}],
+                    "historical": [{"date": "2026-03-20", "open": 548.0, "high": 551.0, "low": 547.0, "close": 550.0, "volume": 1000}],
                 }
             ]
         }
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
             if "stable" in url:
@@ -273,7 +273,7 @@ class TestEndpointFallback:
             "historicalStockList": [
                 {
                     "symbol": "SPY",
-                    "historical": [{"date": "2026-03-20", "close": 550.0}],
+                    "historical": [{"date": "2026-03-20", "open": 548.0, "high": 551.0, "low": 547.0, "close": 550.0, "volume": 1000}],
                 }
             ]
         }
@@ -312,7 +312,7 @@ class TestEndpointFallback:
         """Stable returns truthy list — skipped, falls back to v3."""
         client = self._make_client()
         bad_data = [1, 2, 3]
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
             if "stable" in url:
@@ -341,8 +341,8 @@ class TestEndpointFallback:
     def test_historical_symbol_mismatch_falls_back(self):
         """Single-symbol historical returning wrong symbol is rejected."""
         client = self._make_client()
-        wrong = _mock_response(200, {"symbol": "SPY", "historical": [{"close": 500}]})
-        correct = _mock_response(200, {"symbol": "^GSPC", "historical": [{"close": 5000}]})
+        wrong = _mock_response(200, {"symbol": "SPY", "historical": [{"date": "2026-03-20", "open": 499.0, "high": 501.0, "low": 498.0, "close": 500.0, "volume": 10}]})
+        correct = _mock_response(200, {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 4990.0, "high": 5010.0, "low": 4980.0, "close": 5000.0, "volume": 10}]})
         client.session.get = MagicMock(side_effect=[wrong, correct])
 
         result = client.get_historical_prices("^GSPC", days=80)
@@ -763,7 +763,7 @@ class TestYFinanceFallback:
     def test_fmp_success_does_not_call_yfinance(self, mock_fmp):
         mock_fmp.return_value = {
             "symbol": "SPY",
-            "historical": [{"date": "2026-04-29", "close": 1.0}],
+            "historical": [{"date": "2026-04-29", "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 10}],
         }
         client = _make_client()
         fake_yf = MagicMock()
