@@ -286,3 +286,78 @@ def test_constituents_none_when_fmp_and_csv_both_fail(rel_path, monkeypatch):
         mod.requests, "get", lambda url, **kwargs: _FakeCsvResponse(500, "upstream down")
     )
     assert client.get_sp500_constituents() is None
+
+
+# ---------------------------------------------------------------------------
+# Standalone-install degrade (WPP-20260831-001 corollary): a .skill package is
+# a zip of the skill subtree WITHOUT the repo-root fmp_compat, so the import
+# must not be fatal — the client loads, FMP is typed-unavailable, and the
+# yfinance fallback is the only provider.
+# ---------------------------------------------------------------------------
+
+_COMPAT_IMPORTING_SPECIALS = [
+    "skills/ftd-detector/scripts/fmp_client.py",
+    "skills/macro-regime-detector/scripts/fmp_client.py",
+    "skills/market-top-detector/scripts/fmp_client.py",
+]
+
+
+def _load_without_fmp_compat(rel_path: str):
+    """Load a generated client with `fmp_compat` unimportable (standalone zip)."""
+    abs_path = REPO_ROOT / rel_path
+    skill = abs_path.parent.parent.name.replace("-", "_")
+    name = f"_fmp_standalone_{skill}"
+    sys.modules.pop(name, None)
+    # `sys.modules[key] = None` makes `import key` raise ImportError (py3),
+    # which is exactly what a standalone install produces.
+    saved = sys.modules.get("fmp_compat")
+    sys.modules["fmp_compat"] = None
+    sys.path.insert(0, str(abs_path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location(name, str(abs_path))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(str(abs_path.parent))
+        if saved is not None:
+            sys.modules["fmp_compat"] = saved
+        else:
+            sys.modules.pop("fmp_compat", None)
+
+
+@pytest.mark.parametrize("rel_path", _COMPAT_IMPORTING_SPECIALS)
+def test_standalone_install_loads_and_degrades_to_yf_only(rel_path, monkeypatch, capsys):
+    monkeypatch.setenv("FMP_API_KEY", "test_key")  # pragma: allowlist secret
+    mod = _load_without_fmp_compat(rel_path)
+    assert mod.fmp_get is None  # transport typed-unavailable, not ImportError
+    client = mod.FMPClient(api_key="test_key")  # pragma: allowlist secret
+    # The FMP leg must be a quiet miss (None), never a crash; the WARN prints once.
+    assert client._rate_limited_get("https://financialmodelingprep.com/stable/quote") is None
+    assert client._rate_limited_get("https://financialmodelingprep.com/stable/quote") is None
+    err = capsys.readouterr().err
+    assert err.count("fmp_compat unavailable") == 1
+    # The yfinance fallback still carries the public API end-to-end.
+    # Distinct, strictly-descending dates: ftd's _validate_history proves date
+    # order over the whole list, so a repeated-date fixture is (correctly)
+    # rejected by that client.
+    fake_bars = {
+        "symbol": "SPY",
+        "historical": [
+            {
+                "date": f"2026-08-{day:02d}",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": 1.5,
+                "adjClose": 1.5,
+                "volume": 10,
+            }
+            for day in range(21, 9, -1)
+        ],
+        "data_source": "yfinance",
+    }
+    monkeypatch.setattr(mod, "_yf_history", lambda *a, **k: dict(fake_bars))
+    data = client.get_historical_prices("SPY", days=30)
+    assert data is not None and data["data_source"] == "yfinance"

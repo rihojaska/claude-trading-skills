@@ -34,7 +34,11 @@ SKILL_ROOT = Path(__file__).resolve().parents[3]
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
-from fmp_compat import fmp_get
+try:
+    from fmp_compat import fmp_get
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+
 
 # --- WPP-20260827-009: value boundary for every provider (policy of WPP-20260818-009) ---
 #
@@ -286,6 +290,19 @@ class FMPClient:
         elapsed = time.time() - self.last_call_time
         if elapsed < self.RATE_LIMIT_DELAY:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
+
+        if fmp_get is None:
+            # Standalone .skill install: the repo-root fmp_compat transport is
+            # absent, so FMP is typed-unavailable and the yfinance fallback is
+            # the only provider. WARN once, then quietly return misses.
+            if not getattr(self, "_warned_no_fmp_compat", False):
+                print(
+                    "WARNING: fmp_compat unavailable (standalone install) — "
+                    "FMP disabled, running yfinance-only",
+                    file=sys.stderr,
+                )
+                self._warned_no_fmp_compat = True
+            return None
 
         data = fmp_get(url, params=params, timeout=30, max_retries_per_key=1)
         self.last_call_time = time.time()
