@@ -42,18 +42,19 @@ except ImportError:  # standalone .skill install without the repo-root module
         return []
 
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+# --- FMP endpoint: stable only. FMP retired v3 for non-legacy keys on
+# 2025-08-31; a v3 URL requested through fmp_compat is rewritten back to the
+# equivalent stable endpoint anyway (see `_V3_TO_STABLE` in the repo-root
+# fmp_compat.py), so a second "v3 fallback" entry here was never a distinct
+# endpoint — it was a second, rate-limited query of the SAME stable endpoint
+# plus a misleading WARN line (WPP-20260827-012). The cross-provider fallback
+# is yfinance, wired into the callers below. ---
 
 
 def _stable_quote_url(base, symbols_str, params):
     """stable/quote?symbol=^GSPC"""
     params["symbol"] = symbols_str
     return base, params
-
-
-def _v3_quote_url(base, symbols_str, params):
-    """api/v3/quote/^GSPC"""
-    return f"{base}/{symbols_str}", params
 
 
 def _stable_hist_url(base, symbols_str, params):
@@ -70,19 +71,12 @@ def _stable_hist_url(base, symbols_str, params):
     return base, params
 
 
-def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/^GSPC?timeseries=80"""
-    return f"{base}/{symbols_str}", params
-
-
 _FMP_ENDPOINTS = {
     "quote": [
         ("https://financialmodelingprep.com/stable/quote", _stable_quote_url),
-        ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
         ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
 }
 
@@ -93,8 +87,9 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
     Input  : [{"symbol": "SPY", "date": "...", "open": ..., ...}, ...]
     Output : {"symbol": "SPY", "historical": [{"date": ..., "open": ..., ...}, ...]}
 
-    Returns the input unchanged if not a list (passthrough for v3 dict /
-    historicalStockList responses). Returns None when no row matches the
+    Returns the input unchanged if not a list (passthrough for the dict /
+    historicalStockList shapes the stable batch format can still return).
+    Returns None when no row matches the
     requested symbol; the caller will record the failure and try the next
     endpoint.
 
@@ -366,10 +361,15 @@ class FMPClient:
         return data
 
     def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
-        """Try stable endpoint first, fall back to v3 for legacy users.
+        """Query the stable FMP endpoint; the loop shape stays even though the
+        endpoint list is now a single entry (WPP-20260827-012 — stable is the
+        only FMP endpoint; through fmp_compat, a v3 URL was rewritten back to
+        stable anyway, so a second v3 leg here would just be a second,
+        rate-limited query of the same endpoint). The cross-provider fallback
+        is yfinance, wired into the callers below.
 
-        Returns parsed JSON in v3-compatible shape, or None if all fail.
-        Non-last endpoints use quiet=True to suppress expected 403 stderr.
+        Returns parsed JSON in the historical/quote shape callers expect, or
+        None if the endpoint fails.
         """
         params = dict(extra_params) if extra_params else {}
         endpoints = _FMP_ENDPOINTS[endpoint_key]

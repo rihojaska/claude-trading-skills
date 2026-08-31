@@ -50,6 +50,25 @@ def _no_yf(client):
     )
 
 
+def _with_yf(client, *, quote=None, history=None):
+    """Context manager: stub the yfinance fallback to return fixed (or
+    per-symbol, via a callable) values.
+
+    Since WPP-20260827-012 removed the v3 endpoint rung, yfinance is the
+    ONLY cross-provider fallback FMP's stable endpoint has left, so tests
+    that pin "stable fails -> next provider is tried" stub this instead of a
+    second FMP response.
+    """
+
+    def _resolve(value):
+        return lambda *a, **k: value(*a, **k) if callable(value) else value
+
+    return patch.dict(
+        type(client)._rate_limited_get.__globals__,
+        {"_yf_quote": _resolve(quote), "_yf_history": _resolve(history)},
+    )
+
+
 @pytest.fixture(autouse=True)
 def _restore_transport():
     yield
@@ -128,7 +147,13 @@ def _mock_response(status_code, json_data=None, text=""):
 
 
 class TestEndpointFallback:
-    """Test stable/v3 endpoint fallback logic in FMPClient."""
+    """Test the stable FMP endpoint's fallback to yfinance in FMPClient.
+
+    FMP has a single (stable) endpoint per key as of WPP-20260827-012 — the
+    former "v3 fallback" entry was removed because, through fmp_compat, a v3
+    URL is rewritten back to the equivalent stable endpoint anyway, so it was
+    never a distinct endpoint. The cross-provider fallback is yfinance.
+    """
 
     def _make_client(self):
         """Create FMPClient with mocked session."""
@@ -164,22 +189,21 @@ class TestEndpointFallback:
         assert len(call_log) == 1
         assert "stable" in call_log[0]
 
-    def test_quote_stable_403_falls_back_to_v3(self):
-        """Stable 403, v3 200 returns v3 data."""
+    def test_quote_stable_403_falls_back_to_yfinance(self):
+        """Stable 403 -> yfinance provides the quote (no v3 rung left to try)."""
         client = self._make_client()
-        v3_data = [{"symbol": "^GSPC", "price": 5500.0}]
 
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(403, text="Forbidden")
-            return _mock_response(200, v3_data)
+            return _mock_response(403, text="Forbidden")
 
         client.session.get = mock_get
-        result = client.get_quote("^GSPC")
-        assert result == v3_data
+        yf_quote = {"symbol": "^GSPC", "price": 5500.0, "data_source": "yfinance"}
+        with _with_yf(client, quote=yf_quote):
+            result = client.get_quote("^GSPC")
+        assert result == [yf_quote]
 
     def test_quote_both_fail(self):
-        """Both FMP endpoints 403 and yfinance unavailable returns None."""
+        """Stable 403 and yfinance unavailable returns None."""
         client = self._make_client()
 
         def mock_get(url, params=None, timeout=None):
@@ -192,19 +216,31 @@ class TestEndpointFallback:
             result = client.get_quote("^GSPC")
         assert result is None
 
-    def test_historical_fallback_to_v3(self):
-        """Stable 403, v3 200 returns v3 data for historical."""
+    def test_historical_fallback_to_yfinance(self):
+        """Stable 403 -> yfinance provides historical data (no v3 rung left to try)."""
         client = self._make_client()
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(403, text="Forbidden")
-            return _mock_response(200, v3_data)
+            return _mock_response(403, text="Forbidden")
 
         client.session.get = mock_get
-        result = client.get_historical_prices("^GSPC", days=80)
-        assert result == v3_data
+        yf_hist = {
+            "symbol": "^GSPC",
+            "historical": [
+                {
+                    "date": "2026-03-20",
+                    "open": 5480.0,
+                    "high": 5510.0,
+                    "low": 5470.0,
+                    "close": 5500.0,
+                    "volume": 1000,
+                }
+            ],
+            "data_source": "yfinance",
+        }
+        with _with_yf(client, history=yf_hist):
+            result = client.get_historical_prices("^GSPC", days=80)
+        assert result == yf_hist
         assert "historical" in result
 
     # ------------------------------------------------------------------
@@ -214,7 +250,19 @@ class TestEndpointFallback:
     def test_historical_stable_v3_format_passthrough(self):
         """Stable returns v3-compatible format {'historical': [...]} — returned as-is."""
         client = self._make_client()
-        data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
+        data = {
+            "symbol": "^GSPC",
+            "historical": [
+                {
+                    "date": "2026-03-20",
+                    "open": 5480.0,
+                    "high": 5510.0,
+                    "low": 5470.0,
+                    "close": 5500.0,
+                    "volume": 1000,
+                }
+            ],
+        }
 
         def mock_get(url, params=None, timeout=None):
             return _mock_response(200, data)
@@ -230,7 +278,16 @@ class TestEndpointFallback:
             "historicalStockList": [
                 {
                     "symbol": "^GSPC",
-                    "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}],
+                    "historical": [
+                        {
+                            "date": "2026-03-20",
+                            "open": 5480.0,
+                            "high": 5510.0,
+                            "low": 5470.0,
+                            "close": 5500.0,
+                            "volume": 1000,
+                        }
+                    ],
                 }
             ]
         }
@@ -242,46 +299,83 @@ class TestEndpointFallback:
         result = client.get_historical_prices("^GSPC", days=80)
         assert result is not None
         assert "historical" in result
-        assert result["historical"] == [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]
+        assert result["historical"] == [
+            {
+                "date": "2026-03-20",
+                "open": 5480.0,
+                "high": 5510.0,
+                "low": 5470.0,
+                "close": 5500.0,
+                "volume": 1000,
+            }
+        ]
 
-    def test_historical_stable_batch_no_match_falls_back_to_v3(self):
-        """Stable batch has wrong symbol, falls back to v3 which succeeds."""
+    def test_historical_stable_batch_no_match_falls_back_to_yfinance(self):
+        """Stable batch has wrong symbol, falls back to yfinance (no v3 rung left)."""
         client = self._make_client()
         batch_data = {
             "historicalStockList": [
                 {
                     "symbol": "SPY",
-                    "historical": [{"date": "2026-03-20", "open": 548.0, "high": 551.0, "low": 547.0, "close": 550.0, "volume": 1000}],
+                    "historical": [
+                        {
+                            "date": "2026-03-20",
+                            "open": 548.0,
+                            "high": 551.0,
+                            "low": 547.0,
+                            "close": 550.0,
+                            "volume": 1000,
+                        }
+                    ],
                 }
             ]
         }
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(200, batch_data)
-            return _mock_response(200, v3_data)
+            return _mock_response(200, batch_data)
 
         client.session.get = mock_get
-        result = client.get_historical_prices("^GSPC", days=80)
-        assert result == v3_data
+        yf_hist = {
+            "symbol": "^GSPC",
+            "historical": [
+                {
+                    "date": "2026-03-20",
+                    "open": 5480.0,
+                    "high": 5510.0,
+                    "low": 5470.0,
+                    "close": 5500.0,
+                    "volume": 1000,
+                }
+            ],
+            "data_source": "yfinance",
+        }
+        with _with_yf(client, history=yf_hist):
+            result = client.get_historical_prices("^GSPC", days=80)
+        assert result == yf_hist
 
-    def test_historical_batch_no_match_returns_none_when_v3_also_fails(self):
-        """Stable batch no match + v3 403 + yfinance unavailable returns None."""
+    def test_historical_batch_no_match_returns_none_when_yfinance_unavailable(self):
+        """Stable batch no match + yfinance unavailable returns None."""
         client = self._make_client()
         batch_data = {
             "historicalStockList": [
                 {
                     "symbol": "SPY",
-                    "historical": [{"date": "2026-03-20", "open": 548.0, "high": 551.0, "low": 547.0, "close": 550.0, "volume": 1000}],
+                    "historical": [
+                        {
+                            "date": "2026-03-20",
+                            "open": 548.0,
+                            "high": 551.0,
+                            "low": 547.0,
+                            "close": 550.0,
+                            "volume": 1000,
+                        }
+                    ],
                 }
             ]
         }
 
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(200, batch_data)
-            return _mock_response(403, text="Forbidden")
+            return _mock_response(200, batch_data)
 
         client.session.get = mock_get
         # Simulate yfinance fallback also unavailable.
@@ -294,60 +388,101 @@ class TestEndpointFallback:
     # ------------------------------------------------------------------
 
     def test_quote_rejects_non_list_response(self):
-        """Stable returns truthy dict — skipped, falls back to v3."""
+        """Stable returns truthy dict — rejected, falls back to yfinance."""
         client = self._make_client()
         error_dict = {"Error Message": "Invalid API KEY."}
-        v3_data = [{"symbol": "^GSPC", "price": 5500.0}]
 
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(200, error_dict)
-            return _mock_response(200, v3_data)
+            return _mock_response(200, error_dict)
 
         client.session.get = mock_get
-        result = client.get_quote("^GSPC")
-        assert result == v3_data
+        yf_quote = {"symbol": "^GSPC", "price": 5500.0, "data_source": "yfinance"}
+        with _with_yf(client, quote=yf_quote):
+            result = client.get_quote("^GSPC")
+        assert result == [yf_quote]
 
     def test_historical_rejects_non_dict_response(self):
-        """Stable returns truthy list — skipped, falls back to v3."""
+        """Stable returns truthy list — rejected, falls back to yfinance."""
         client = self._make_client()
         bad_data = [1, 2, 3]
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 5480.0, "high": 5510.0, "low": 5470.0, "close": 5500.0, "volume": 1000}]}
 
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(200, bad_data)
-            return _mock_response(200, v3_data)
+            return _mock_response(200, bad_data)
 
         client.session.get = mock_get
-        result = client.get_historical_prices("^GSPC", days=80)
-        assert result == v3_data
+        yf_hist = {
+            "symbol": "^GSPC",
+            "historical": [
+                {
+                    "date": "2026-03-20",
+                    "open": 5480.0,
+                    "high": 5510.0,
+                    "low": 5470.0,
+                    "close": 5500.0,
+                    "volume": 1000,
+                }
+            ],
+            "data_source": "yfinance",
+        }
+        with _with_yf(client, history=yf_hist):
+            result = client.get_historical_prices("^GSPC", days=80)
+        assert result == yf_hist
 
     # ------------------------------------------------------------------
     # Symbol mismatch protection
     # ------------------------------------------------------------------
 
     def test_quote_symbol_mismatch_falls_back(self):
-        """Single-symbol quote returning wrong symbol is rejected."""
+        """Single-symbol quote returning wrong symbol is rejected, falls back to yfinance."""
         client = self._make_client()
         wrong = _mock_response(200, [{"symbol": "SPY", "price": 500.0}])
-        correct = _mock_response(200, [{"symbol": "^GSPC", "price": 5000.0}])
-        client.session.get = MagicMock(side_effect=[wrong, correct])
+        client.session.get = MagicMock(return_value=wrong)
 
-        result = client.get_quote("^GSPC")
-        assert result == [{"symbol": "^GSPC", "price": 5000.0}]
-        assert client.session.get.call_count == 2
+        yf_quote = {"symbol": "^GSPC", "price": 5000.0, "data_source": "yfinance"}
+        with _with_yf(client, quote=yf_quote):
+            result = client.get_quote("^GSPC")
+        assert result == [yf_quote]
+        assert client.session.get.call_count == 1
 
     def test_historical_symbol_mismatch_falls_back(self):
-        """Single-symbol historical returning wrong symbol is rejected."""
+        """Single-symbol historical returning wrong symbol is rejected, falls back to yfinance."""
         client = self._make_client()
-        wrong = _mock_response(200, {"symbol": "SPY", "historical": [{"date": "2026-03-20", "open": 499.0, "high": 501.0, "low": 498.0, "close": 500.0, "volume": 10}]})
-        correct = _mock_response(200, {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "open": 4990.0, "high": 5010.0, "low": 4980.0, "close": 5000.0, "volume": 10}]})
-        client.session.get = MagicMock(side_effect=[wrong, correct])
+        wrong = _mock_response(
+            200,
+            {
+                "symbol": "SPY",
+                "historical": [
+                    {
+                        "date": "2026-03-20",
+                        "open": 499.0,
+                        "high": 501.0,
+                        "low": 498.0,
+                        "close": 500.0,
+                        "volume": 10,
+                    }
+                ],
+            },
+        )
+        client.session.get = MagicMock(return_value=wrong)
 
-        result = client.get_historical_prices("^GSPC", days=80)
+        yf_hist = {
+            "symbol": "^GSPC",
+            "historical": [
+                {
+                    "date": "2026-03-20",
+                    "open": 4990.0,
+                    "high": 5010.0,
+                    "low": 4980.0,
+                    "close": 5000.0,
+                    "volume": 10,
+                }
+            ],
+            "data_source": "yfinance",
+        }
+        with _with_yf(client, history=yf_hist):
+            result = client.get_historical_prices("^GSPC", days=80)
         assert result["symbol"] == "^GSPC"
-        assert client.session.get.call_count == 2
+        assert client.session.get.call_count == 1
 
     def test_batch_quote_skips_symbol_check(self):
         """Multi-symbol (batch) quote does not apply symbol mismatch check."""
@@ -365,24 +500,22 @@ class TestEndpointFallback:
     # ------------------------------------------------------------------
 
     def test_vix_term_structure_works_via_fallback(self):
-        """VIX term structure succeeds when get_quote uses stable->v3 fallback."""
+        """VIX term structure succeeds when get_quote falls back to yfinance
+        (no v3 rung left; stable is the only FMP endpoint post-WPP-20260827-012)."""
         client = self._make_client()
 
-        vix_data = [{"symbol": "^VIX", "price": 18.0}]
-        vix3m_data = [{"symbol": "^VIX3M", "price": 20.0}]
-
         def mock_get(url, params=None, timeout=None):
-            if "stable" in url:
-                return _mock_response(403, text="Forbidden")
-            # v3 fallback: route by symbol in URL path
-            if "^VIX3M" in url:
-                return _mock_response(200, vix3m_data)
-            if "^VIX" in url:
-                return _mock_response(200, vix_data)
-            return _mock_response(404, text="Not Found")
+            return _mock_response(403, text="Forbidden")
 
         client.session.get = mock_get
-        result = client.get_vix_term_structure()
+
+        def yf_quote(symbol):
+            if "VIX3M" in symbol:
+                return {"symbol": "^VIX3M", "price": 20.0, "data_source": "yfinance"}
+            return {"symbol": "^VIX", "price": 18.0, "data_source": "yfinance"}
+
+        with _with_yf(client, quote=yf_quote):
+            result = client.get_vix_term_structure()
 
         assert result is not None
         assert result["vix"] == 18.0
@@ -763,7 +896,16 @@ class TestYFinanceFallback:
     def test_fmp_success_does_not_call_yfinance(self, mock_fmp):
         mock_fmp.return_value = {
             "symbol": "SPY",
-            "historical": [{"date": "2026-04-29", "open": 1.0, "high": 1.1, "low": 0.9, "close": 1.0, "volume": 10}],
+            "historical": [
+                {
+                    "date": "2026-04-29",
+                    "open": 1.0,
+                    "high": 1.1,
+                    "low": 0.9,
+                    "close": 1.0,
+                    "volume": 10,
+                }
+            ],
         }
         client = _make_client()
         fake_yf = MagicMock()

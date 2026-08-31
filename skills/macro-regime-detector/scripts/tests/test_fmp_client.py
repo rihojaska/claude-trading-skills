@@ -237,8 +237,8 @@ class TestYFinanceFallback:
 
     @patch.object(FMPClient, "_request_with_fallback")
     def test_empty_historical_dict_triggers_yfinance(self, mock_fmp):
-        # v3 can return a truthy dict with an EMPTY historical list for an
-        # ETF unavailable on the caller's plan. Must still fall back.
+        # The stable endpoint can return a truthy dict with an EMPTY historical
+        # list for an ETF unavailable on the caller's plan. Must still fall back.
         mock_fmp.return_value = {"symbol": "XLK", "historical": []}
         client = _make_client()
         fake_df = _FakeDF([_row("2026-04-29", 2.0, 3.0, 1.5, 2.5, 300)])

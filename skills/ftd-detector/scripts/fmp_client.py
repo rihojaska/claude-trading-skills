@@ -41,18 +41,19 @@ except ImportError:  # standalone .skill install without the repo-root module
         return []
 
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+# --- FMP endpoint: stable only. FMP retired v3 for non-legacy keys on
+# 2025-08-31; a v3 URL requested through fmp_compat is rewritten back to the
+# equivalent stable endpoint anyway (see `_V3_TO_STABLE` in the repo-root
+# fmp_compat.py), so a second "v3 fallback" entry here was never a distinct
+# endpoint — it was a second, rate-limited query of the SAME stable endpoint
+# plus a misleading WARN line (WPP-20260827-012). The cross-provider fallback
+# is yfinance, wired into the callers below. ---
 
 
 def _stable_quote_url(base, symbols_str, params):
     """stable/quote?symbol=^GSPC"""
     params["symbol"] = symbols_str
     return base, params
-
-
-def _v3_quote_url(base, symbols_str, params):
-    """api/v3/quote/^GSPC"""
-    return f"{base}/{symbols_str}", params
 
 
 def _stable_hist_url(base, symbols_str, params):
@@ -69,19 +70,12 @@ def _stable_hist_url(base, symbols_str, params):
     return base, params
 
 
-def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/^GSPC?timeseries=80"""
-    return f"{base}/{symbols_str}", params
-
-
 _FMP_ENDPOINTS = {
     "quote": [
         ("https://financialmodelingprep.com/stable/quote", _stable_quote_url),
-        ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
         ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
 }
 
@@ -92,10 +86,10 @@ def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None
     Input  : [{"symbol": "SPY", "date": "...", "open": ..., ...}, ...]
     Output : {"symbol": "SPY", "historical": [{"date": ..., "open": ..., ...}, ...]}
 
-    Returns the input unchanged if not a list (passthrough for v3 dict /
-    historicalStockList responses). Returns None when no row matches the
-    requested symbol; the caller will record the failure and try the next
-    endpoint.
+    Returns the input unchanged if not a list (passthrough for the dict /
+    historicalStockList shapes the stable batch format can still return).
+    Returns None when no row matches the requested symbol; the caller will
+    record the failure and try the next endpoint.
 
     If `limit` is provided (the original `timeseries=N` request), the
     `historical` list is truncated to the first `limit` entries. The new
@@ -470,14 +464,15 @@ class FMPClient:
         return data
 
     def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
-        """Try stable endpoint first, fall back to v3 for legacy users.
+        """Query the stable FMP endpoint; the loop shape stays even though the
+        endpoint list is now a single entry (WPP-20260827-012 — stable is the
+        only FMP endpoint; through fmp_compat, a v3 URL was rewritten back to
+        stable anyway, so a second v3 leg here would just be a second,
+        rate-limited query of the same endpoint). The cross-provider fallback
+        is yfinance, wired into the callers below.
 
-        Returns parsed JSON in v3-compatible shape, or None if all fail.
-        Non-last endpoints are called with quiet=True so the user isn't
-        alarmed by an expected stable failure when v3 will catch it — but
-        when a non-last endpoint DOES fail, a WARN line is emitted explaining
-        why we're falling back. Otherwise users only see the (often misleading)
-        last-endpoint error and have no clue what really went wrong.
+        Returns parsed JSON in the historical/quote shape callers expect, or
+        None if the endpoint fails.
         """
         params = dict(extra_params) if extra_params else {}
         endpoints = _FMP_ENDPOINTS[endpoint_key]
@@ -566,9 +561,11 @@ class FMPClient:
 
             # Content validation runs HERE, inside the endpoint loop — not in the
             # public wrapper. A stable response that is shape-valid but carries a
-            # non-finite or out-of-order bar is a FAILED ENDPOINT, so v3 must be
-            # tried next; validating one level up skipped straight to yfinance and
-            # turned a recoverable response into missing history (codex gate r1).
+            # non-finite or out-of-order bar is a FAILED ENDPOINT that must be
+            # recorded as one (`_record_endpoint_failure`/`_warn_fallback` below);
+            # validating one level up skipped straight to yfinance without ever
+            # marking the endpoint failed, which broke the disable-after-N-failures
+            # circuit breaker (codex gate r1).
             if valid:
                 if endpoint_key == "historical":
                     validated = _validate_history(data)
@@ -632,7 +629,8 @@ class FMPClient:
             return self.cache[cache_key]
 
         # FMP-side price validation lives in `_request_with_fallback` so a bad
-        # stable response falls through to v3 rather than skipping to yfinance.
+        # stable response is recorded as a failed endpoint before this method
+        # ever sees it, rather than silently skipping to yfinance.
         data = self._request_with_fallback("quote", symbols)
         if not data:
             quotes = []
@@ -655,9 +653,9 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        # The FMP endpoints validate inside `_request_with_fallback` (so a bad
-        # stable response still gets v3 tried); the yfinance fallback below has no
-        # such loop, so it is validated here. Both go through the SAME predicate,
+        # The FMP endpoint validates inside `_request_with_fallback`; the
+        # yfinance fallback below has no such loop, so it is validated here.
+        # Both go through the SAME predicate,
         # and in both cases validation precedes the provenance stamp and the cache
         # write — a rejected payload must not claim a source it could not supply,
         # and must not be cached, or every later caller (`get_batch_historical`

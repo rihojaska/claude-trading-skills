@@ -124,10 +124,7 @@ def _valid_tail(n=12, start="2026-08-13"):
     about trimming.
     """
     d0 = _dt.date.fromisoformat(start)
-    return [
-        ((d0 - _dt.timedelta(days=i)).isoformat(), 100.0 - i * 0.1, 1_000)
-        for i in range(n)
-    ]
+    return [((d0 - _dt.timedelta(days=i)).isoformat(), 100.0 - i * 0.1, 1_000) for i in range(n)]
 
 
 def _client():
@@ -138,11 +135,11 @@ def _client():
 def _transport(*responses):
     """Patch the TRANSPORT, not `_request_with_fallback`.
 
-    Content validation lives inside the endpoint loop so a shape-valid but
-    untrustworthy stable response still gets v3 tried (codex gate r1). Patching
-    the wrapper would skip the very loop under test; each positional argument
-    here is one endpoint's parsed response, in stable-then-v3 order, and a single
-    argument answers every endpoint.
+    Content validation lives inside the endpoint loop, not the public wrapper
+    (codex gate r1) — patching the wrapper would skip the very loop under
+    test. Each positional argument here is one endpoint's parsed response, in
+    endpoint-list order (stable is the only entry post-WPP-20260827-012), and
+    a single argument answers every endpoint.
     """
     queue = list(responses)
 
@@ -353,7 +350,10 @@ class TestQuoteBoundary:
         MUTANT: validate history only -> this fails while everything else passes.
         """
         client = _client()
-        with _transport([{"symbol": "QQQ", "price": bad}]), patch.object(fc, "_yf_quote", return_value=None):
+        with (
+            _transport([{"symbol": "QQQ", "price": bad}]),
+            patch.object(fc, "_yf_quote", return_value=None),
+        ):
             assert client.get_quote("QQQ") is None
         assert client.cache == {}
         assert "quote:QQQ" not in client.data_sources
@@ -400,13 +400,11 @@ class TestIncidentShape:
             out = client.get_historical_prices("QQQ", days=40)
 
         assert out is not None, "a trailing unsettled bar must not blank the symbol"
-        assert all(
-            math.isfinite(b["close"]) for b in out["historical"]
-        ), "no non-finite close may survive the boundary"
-
-        state = rally_tracker.analyze_single_index(
-            list(reversed(out["historical"])), "NASDAQ"
+        assert all(math.isfinite(b["close"]) for b in out["historical"]), (
+            "no non-finite close may survive the boundary"
         )
+
+        state = rally_tracker.analyze_single_index(list(reversed(out["historical"])), "NASDAQ")
         ftd = state.get("ftd") or {}
         gain = ftd.get("gain_pct")
         assert gain is None or math.isfinite(gain), f"FTD scored off a non-finite gain: {gain!r}"
@@ -442,44 +440,47 @@ class TestOrderIsProvenBeforeTrimming:
             assert client.get_historical_prices("QQQ", days=4) is None
 
 
-class TestContentFailureStillTriesTheNextEndpoint:
+class TestContentFailureStillFallsBackToYfinance:
     """A shape-valid but untrustworthy stable response is a FAILED ENDPOINT.
 
-    Validating in the public wrapper instead of the endpoint loop skipped the
-    rest of the endpoint list and went straight to yfinance.
+    Validating in the public wrapper instead of the endpoint loop would let a
+    content-invalid stable response silently short-circuit before the
+    yfinance fallback ever runs, and would skip `_record_endpoint_failure`
+    (the circuit breaker) for a response that DID reach the loop.
 
-    Scope of the claim: these tests mock `_rate_limited_get`, so they pin the
-    LOOP's ordering — the next endpoint is tried before the yfinance fallback —
-    and nothing about the two endpoints hitting distinct upstreams. In this
-    deployment they do not: `fmp_compat` rewrites `/api/v3/...` back to
-    `/stable/...`, so the second attempt re-queries the first (pre-existing,
-    filed as WPP-20260827-012, found by codex gate r5). The ordering is still
-    the correct contract, and it is what makes the code right for any endpoint
-    pair that is not rewritten.
+    Historically this was pinned by proving a v3 leg still got a chance after
+    a content-invalid stable response (`_FMP_ENDPOINTS["historical"|"quote"]`
+    carried a second, `/api/v3/...` entry). That entry was removed
+    (WPP-20260827-012): `fmp_compat` rewrites `/api/v3/...` back to
+    `/stable/...`, so it was never a distinct endpoint — just a second,
+    rate-limited query of the SAME stable endpoint plus a misleading WARN
+    line. Stable is now the only FMP endpoint, so the next (and only)
+    provider content failure falls back to is yfinance.
     """
 
-    def test_bad_stable_history_falls_back_to_v3_not_yfinance(self):
+    def test_bad_stable_history_falls_back_to_yfinance(self):
         bad = {"symbol": "QQQ", "historical": _bars([("2026-08-18", NAN, 1_000)])}
         good = {
             "symbol": "QQQ",
             "historical": _bars([("2026-08-18", 102.0, 1_000), ("2026-08-17", 101.0, 1_000)]),
         }
         client = _client()
-        with _transport(bad, good), patch.object(fc, "_yf_history", return_value=None):
+        with _transport(bad), patch.object(fc, "_yf_history", return_value=good):
             out = client.get_historical_prices("QQQ", days=2)
-        assert out is not None, "v3 was never tried"
+        assert out is not None, "content-invalid stable response should still fall back to yfinance"
         assert [b["date"] for b in out["historical"]] == ["2026-08-18", "2026-08-17"]
-        assert client.data_sources["historical:QQQ"] == "fmp"
+        assert client.data_sources["historical:QQQ"] == "yfinance"
 
-    def test_bad_stable_quote_falls_back_to_v3_not_yfinance(self):
+    def test_bad_stable_quote_falls_back_to_yfinance(self):
         client = _client()
+        good_quote = {"symbol": "QQQ", "price": 450.0, "data_source": "yfinance"}
         with (
-            _transport([{"symbol": "QQQ", "price": NAN}], [{"symbol": "QQQ", "price": 450.0}]),
-            patch.object(fc, "_yf_quote", return_value=None),
+            _transport([{"symbol": "QQQ", "price": NAN}]),
+            patch.object(fc, "_yf_quote", return_value=good_quote),
         ):
             out = client.get_quote("QQQ")
-        assert out == [{"symbol": "QQQ", "price": 450.0}]
-        assert client.data_sources["quote:QQQ"] == "fmp"
+        assert out == [good_quote]
+        assert client.data_sources["quote:QQQ"] == "yfinance"
 
 
 class TestPerFieldOhlcValidation:
@@ -563,8 +564,9 @@ class TestTrimIsCapped:
         specs = [(f"2026-08-{28 - i:02d}", NAN, 1_000) for i in range(4)]
         specs += [(f"2026-08-{24 - i:02d}", 100.0 + i, 1_000) for i in range(12)]
         client = _client()
-        with _transport({"symbol": "QQQ", "historical": _bars(specs)}), patch.object(
-            fc, "_yf_history", return_value=None
+        with (
+            _transport({"symbol": "QQQ", "historical": _bars(specs)}),
+            patch.object(fc, "_yf_history", return_value=None),
         ):
             assert client.get_historical_prices("QQQ", days=16) is None
 
@@ -636,8 +638,7 @@ class TestPredicatesCannotRaise:
         payload = {
             "symbol": "QQQ",
             "historical": _bars(
-                [("2026-08-18", 10**1000, 1_000), ("2026-08-17", 101.0, 1_000)]
-                + _valid_tail()
+                [("2026-08-18", 10**1000, 1_000), ("2026-08-17", 101.0, 1_000)] + _valid_tail()
             ),
         }
         client = _client()
