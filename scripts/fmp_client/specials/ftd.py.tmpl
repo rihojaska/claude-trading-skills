@@ -490,7 +490,7 @@ class FMPClient:
             data = self._rate_limited_get(url, final_params, quiet=not is_last)
             if not data:  # falsy (None, [], {}) — try next endpoint
                 self._record_endpoint_failure(base_url)
-                self._warn_fallback(base_url, is_last, self._last_error)
+                self._warn_fallback(base_url, is_last, self._last_error, transport=True)
                 continue
 
             # Normalize new stable EOD flat-list shape to v3-compatible dict.
@@ -606,14 +606,25 @@ class FMPClient:
             self._warn_fallback(base_url, is_last, shape_issue or "unexpected response shape")
         return None
 
-    def _warn_fallback(self, base_url: str, is_last: bool, reason: Optional[str]) -> None:
-        """Emit a WARN line so users see why a non-last endpoint failed and the
-        client is falling back. No-op when the failing endpoint is the last one
-        (its error was already printed by _rate_limited_get with quiet=False)."""
-        if is_last or not reason:
+    def _warn_fallback(
+        self, base_url: str, is_last: bool, reason: Optional[str], transport: bool = False
+    ) -> None:
+        """Emit a WARN line so users see why an endpoint failed and the client
+        is falling back.
+
+        Suppressed only for a TRANSPORT failure on the last endpoint — that
+        error was already printed by _rate_limited_get with quiet=False.
+        Content-validation rejections (bad shape, non-finite values) are
+        printed NOWHERE else, and with the single stable endpoint every call
+        is now the last one — suppressing those left "guard caught bad data"
+        indistinguishable from "endpoint unreachable" (codex gate r2 on the
+        WPP-20260827-012 rung deletion).
+        """
+        if not reason or (is_last and transport):
             return
+        target = "yfinance" if is_last else "next endpoint"
         print(
-            f"WARN: {base_url} failed ({reason}); falling back to next endpoint",
+            f"WARN: {base_url} failed ({reason}); falling back to {target}",
             file=sys.stderr,
         )
 

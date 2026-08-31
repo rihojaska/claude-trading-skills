@@ -671,3 +671,56 @@ class TestSingleSymbolQuoteIdentity:
         with _transport(response), patch.object(fc, "_yf_quote", return_value=None):
             out = client.get_quote("QQQ,SPY")
         assert out == [{"symbol": "SPY", "price": 500.0}]
+
+
+class TestContentRejectionIsLoudOnTheLastEndpoint:
+    """codex gate r2 (WPP-20260827-012): with the single stable endpoint every
+    call is the last one, and the old is_last suppression silenced every
+    content-validation rejection — 'guard caught bad data' became
+    indistinguishable from 'endpoint unreachable'."""
+
+    def test_validation_rejection_warns_even_on_last_endpoint(self, capsys):
+        client = FMPClient(api_key="test_key")  # pragma: allowlist secret
+        bad = [
+            {
+                "symbol": "^GSPC",
+                "date": "2026-08-21",
+                "open": 1.0,
+                "high": 2.0,
+                "low": 0.5,
+                "close": float("nan"),
+                "volume": 10,
+                "adjClose": 1.5,
+            }
+        ]
+        with (
+            patch.dict(
+                type(client)._rate_limited_get.__globals__,
+                {"fmp_get": lambda url, params=None, **_kw: bad},
+            ),
+            patch.dict(
+                type(client)._rate_limited_get.__globals__,
+                {"_yf_history": lambda *a, **k: None},
+            ),
+        ):
+            assert client.get_historical_prices("^GSPC", days=30) is None
+        err = capsys.readouterr().err
+        assert "falling back to yfinance" in err
+
+    def test_transport_failure_on_last_endpoint_stays_unduplicated(self, capsys):
+        client = FMPClient(api_key="test_key")  # pragma: allowlist secret
+        with (
+            patch.dict(
+                type(client)._rate_limited_get.__globals__,
+                {"fmp_get": lambda url, params=None, **_kw: None},
+            ),
+            patch.dict(
+                type(client)._rate_limited_get.__globals__,
+                {"_yf_history": lambda *a, **k: None},
+            ),
+        ):
+            assert client.get_historical_prices("^GSPC", days=30) is None
+        err = capsys.readouterr().err
+        # _rate_limited_get already printed the transport error; _warn_fallback
+        # must not add a second line for the same failure.
+        assert "falling back to yfinance" not in err
