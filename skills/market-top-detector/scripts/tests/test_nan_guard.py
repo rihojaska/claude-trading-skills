@@ -250,3 +250,69 @@ def test_fmp_finite_payload_still_passes_untouched():
     assert data is not None
     assert data["historical"][0]["close"] == 1.5
     assert data["data_source"] == "fmp"
+
+
+def test_fmp_batch_stocklist_nan_falls_back_to_yf(capsys):
+    # The historicalStockList branch has its own return path — the boundary
+    # must hold there too, and the rejection must be LOUD (an operator has to
+    # be able to tell "guard caught bad data" from "endpoint unreachable").
+    payload = {
+        "historicalStockList": [
+            {
+                "symbol": "^GSPC",
+                "historical": [
+                    {"date": "2026-08-21", "open": 1.0, "high": 2.0, "low": 0.5, "close": NAN, "volume": 10}
+                ],
+            }
+        ]
+    }
+    client, transport = _client_with_fmp({"historical-price-eod": payload})
+    with transport, _with_yf([_bar_row(20)]):
+        data = client.get_historical_prices("^GSPC", days=30)
+    assert data is not None and data["data_source"] == "yfinance"
+    assert "failed the value boundary" in capsys.readouterr().err
+
+
+def test_fmp_side_rejection_is_loud(capsys):
+    fmp_rows = [
+        {"symbol": "^GSPC", "date": "2026-08-21", "open": 1.0, "high": 2.0, "low": 0.5, "close": NAN, "volume": 10}
+    ]
+    client, transport = _client_with_fmp({"historical-price-eod": fmp_rows})
+    with transport, patch.object(fc, "_yf_history", lambda *a, **k: None):
+        assert client.get_historical_prices("^GSPC", days=30) is None
+    assert "failed the value boundary" in capsys.readouterr().err
+
+
+def test_rejection_caches_nothing_and_stamps_no_provenance():
+    fmp_rows = [
+        {"symbol": "^GSPC", "date": "2026-08-21", "open": 1.0, "high": 2.0, "low": 0.5, "close": NAN, "volume": 10}
+    ]
+    client, transport = _client_with_fmp({"historical-price-eod": fmp_rows})
+    with transport, patch.object(fc, "_yf_history", lambda *a, **k: None):
+        assert client.get_historical_prices("^GSPC", days=30) is None
+    assert client.cache == {}
+    assert "historical:^GSPC" not in client.data_sources
+
+
+def test_mixed_quote_batch_keeps_only_finite_priced_rows():
+    # Quotes are independent per-symbol records: in a MULTI-symbol request a
+    # NaN-priced row is dropped, the finite one survives (deliberate deviation
+    # from the historical bars' all-or-none rule).
+    quotes = [{"symbol": "AAA", "price": NAN}, {"symbol": "BBB", "price": 42.0}]
+    client, transport = _client_with_fmp({"quote": quotes})
+    with transport:
+        result = client.get_quote("AAA,BBB")
+    assert result == [{"symbol": "BBB", "price": 42.0}]
+
+
+def test_single_symbol_quote_drops_unrelated_rows():
+    # Identity before price (ftd gate-r3 lesson): a foreign row with a valid
+    # price must not leak into a single-symbol response — element [0] and the
+    # batch dict key by symbol downstream.
+    quotes = [{"symbol": "UNRELATED", "price": 42.0}, {"symbol": "^GSPC", "price": 5000.0}]
+    client, transport = _client_with_fmp({"quote": quotes})
+    with transport:
+        result = client.get_quote("^GSPC")
+    assert result == [{"symbol": "^GSPC", "price": 5000.0}]
+    batch = client.get_batch_quotes(["^GSPC"])
+    assert set(batch) == {"^GSPC"}

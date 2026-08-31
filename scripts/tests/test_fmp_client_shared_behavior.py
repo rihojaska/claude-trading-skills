@@ -329,10 +329,14 @@ def _load_without_fmp_compat(rel_path: str):
 
 @pytest.mark.parametrize("rel_path", _COMPAT_IMPORTING_SPECIALS)
 def test_standalone_install_loads_and_degrades_to_yf_only(rel_path, monkeypatch, capsys):
-    monkeypatch.setenv("FMP_API_KEY", "test_key")  # pragma: allowlist secret
+    # NO key anywhere: a bare standalone install has no secrets file to
+    # self-load from, and requiring a key that can never be used was the
+    # SECOND way the client died before reaching yfinance (impl-panel P1).
+    monkeypatch.delenv("FMP_API_KEY", raising=False)
+    monkeypatch.delenv("FMP_FALLBACK_API_KEY", raising=False)
     mod = _load_without_fmp_compat(rel_path)
     assert mod.fmp_get is None  # transport typed-unavailable, not ImportError
-    client = mod.FMPClient(api_key="test_key")  # pragma: allowlist secret
+    client = mod.FMPClient()  # must NOT raise "FMP API key required"
     # The FMP leg must be a quiet miss (None), never a crash; the WARN prints once.
     assert client._rate_limited_get("https://financialmodelingprep.com/stable/quote") is None
     assert client._rate_limited_get("https://financialmodelingprep.com/stable/quote") is None

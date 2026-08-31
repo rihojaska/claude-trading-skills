@@ -303,13 +303,18 @@ class FMPClient:
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
-        if not self.api_key:
+        # In standalone yf-only mode (fmp_get is None) no FMP call can ever be
+        # made, so a missing key must not abort construction — this ValueError
+        # was the SECOND way a bare .skill install died before reaching the
+        # yfinance fallback (WPP-20260831-001 corollary).
+        if not self.api_key and fmp_get is not None:
             raise ValueError(
                 "FMP API key required. Set FMP_API_KEY environment variable "
                 "or pass api_key parameter."
             )
         self.session = requests.Session()
-        self.session.headers.update({"apikey": self.api_key})
+        if self.api_key:
+            self.session.headers.update({"apikey": self.api_key})
         self.cache = {}
         self.last_call_time = 0
         self.rate_limit_reached = False
@@ -410,14 +415,37 @@ class FMPClient:
                 ):
                     valid = False
                 else:
+                    # Identity BEFORE price (ftd gate-r3 lesson): for a
+                    # single-symbol request, narrow to rows matching the
+                    # requested symbol first — a symbol-omitting row on a
+                    # single-symbol endpoint belongs to the request.
+                    # Price-filtering first could drop the requested row and
+                    # hand the caller an unrelated security as element [0].
+                    candidates = data
+                    if is_single:
+                        norm = symbols_str.replace("-", ".")
+                        candidates = [
+                            q
+                            for q in candidates
+                            if isinstance(q, dict)
+                            and (q.get("symbol") or symbols_str).replace("-", ".") == norm
+                        ]
                     # WPP-20260827-009 value boundary: a quote without a real,
                     # positive price is not a quote. Quotes are independent
                     # per-symbol records, so filtering (unlike bar-splicing in a
                     # time series) removes nothing positional.
                     kept_quotes = [
-                        q for q in data if isinstance(q, dict) and _finite_positive(q.get("price"))
+                        q
+                        for q in candidates
+                        if isinstance(q, dict) and _finite_positive(q.get("price"))
                     ]
                     if not kept_quotes:
+                        print(
+                            f"WARNING: FMP quote payload for {symbols_str} carried no "
+                            "matching quote with a real, positive price; rejecting "
+                            "(WPP-20260827-009)",
+                            file=sys.stderr,
+                        )
                         valid = False
                     else:
                         data = kept_quotes
@@ -436,9 +464,16 @@ class FMPClient:
                                 "historical": entry.get("historical", []),
                             }
                             break
-                    if found and _history_values_ok(found):
-                        self._endpoint_failures[base_url] = 0
-                        return found
+                    if found:
+                        if _history_values_ok(found):
+                            self._endpoint_failures[base_url] = 0
+                            return found
+                        print(
+                            f"WARNING: FMP batch history for {symbols_str} failed the "
+                            "value boundary (non-finite or non-positive field); "
+                            "rejecting the payload (WPP-20260827-009)",
+                            file=sys.stderr,
+                        )
                     valid = False
                 elif "historical" not in data:
                     valid = False
@@ -448,7 +483,16 @@ class FMPClient:
                 # WPP-20260827-009 value boundary: FMP JSON can carry bare NaN
                 # (json.loads accepts it) and _normalize_eod_flat_list copies
                 # row values verbatim — all-or-none, same rule as the yf path.
+                # The rejection must be as loud as the yf-side one: an operator
+                # debugging a missing signal has to be able to tell "the guard
+                # caught bad data" from "the endpoint was unreachable".
                 if valid and not _history_values_ok(data):
+                    print(
+                        f"WARNING: FMP history for {symbols_str} failed the value "
+                        "boundary (non-finite or non-positive field); rejecting the "
+                        "payload (WPP-20260827-009)",
+                        file=sys.stderr,
+                    )
                     valid = False
 
             if valid:
@@ -461,8 +505,16 @@ class FMPClient:
         """Track consecutive failures and disable endpoint after threshold."""
         failures = self._endpoint_failures.get(base_url, 0) + 1
         self._endpoint_failures[base_url] = failures
-        if failures >= self._ENDPOINT_FAILURE_THRESHOLD:
+        if (
+            failures >= self._ENDPOINT_FAILURE_THRESHOLD
+            and base_url not in self._disabled_endpoints
+        ):
             self._disabled_endpoints.add(base_url)
+            print(
+                f"WARNING: FMP endpoint disabled for the rest of this run after "
+                f"{failures} consecutive failures: {base_url}",
+                file=sys.stderr,
+            )
 
     def get_quote(self, symbols: str) -> Optional[list[dict]]:
         """Fetch real-time quote data for one or more symbols (comma-separated).

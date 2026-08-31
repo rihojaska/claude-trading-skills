@@ -392,13 +392,18 @@ class FMPClient:
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
-        if not self.api_key:
+        # In standalone yf-only mode (fmp_get is None) no FMP call can ever be
+        # made, so a missing key must not abort construction — this ValueError
+        # was the SECOND way a bare .skill install died before reaching the
+        # yfinance fallback (WPP-20260831-001 corollary).
+        if not self.api_key and fmp_get is not None:
             raise ValueError(
                 "FMP API key required. Set FMP_API_KEY environment variable "
                 "or pass api_key parameter."
             )
         self.session = requests.Session()
-        self.session.headers.update({"apikey": self.api_key})
+        if self.api_key:
+            self.session.headers.update({"apikey": self.api_key})
         self.cache = {}
         self.last_call_time = 0
         self.rate_limit_reached = False
@@ -616,8 +621,16 @@ class FMPClient:
         """Track consecutive failures and disable endpoint after threshold."""
         failures = self._endpoint_failures.get(base_url, 0) + 1
         self._endpoint_failures[base_url] = failures
-        if failures >= self._ENDPOINT_FAILURE_THRESHOLD:
+        if (
+            failures >= self._ENDPOINT_FAILURE_THRESHOLD
+            and base_url not in self._disabled_endpoints
+        ):
             self._disabled_endpoints.add(base_url)
+            print(
+                f"WARNING: FMP endpoint disabled for the rest of this run after "
+                f"{failures} consecutive failures: {base_url}",
+                file=sys.stderr,
+            )
 
     def get_quote(self, symbols: str) -> Optional[list[dict]]:
         """Fetch real-time quote data for one or more symbols (comma-separated)"""
