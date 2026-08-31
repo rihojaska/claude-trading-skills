@@ -183,3 +183,16 @@ def test_rejection_is_loud_and_caches_nothing(capsys):
     assert "failed the value boundary" in capsys.readouterr().err
     assert client.cache == {}
     assert "historical:SPY" not in client.data_sources
+
+
+def test_history_values_ok_present_adjclose_must_be_real():
+    # codex gate r1: macro's monthly downsampling prefers adjClose — a present
+    # NaN/None/0 adjClose must reject even when close is finite.
+    good = _fmp_bar()
+    good["adjClose"] = 100.0
+    assert fc._history_values_ok(_payload([good]))
+    assert fc._history_values_ok(_payload([_fmp_bar()]))  # absent adjClose acceptable
+    for bad_val in (NAN, None, 0):
+        bad = _fmp_bar()
+        bad["adjClose"] = bad_val
+        assert not fc._history_values_ok(_payload([bad])), bad_val

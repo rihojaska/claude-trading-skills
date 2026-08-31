@@ -166,6 +166,24 @@ def _finite_positive(value) -> bool:
     return _finite(value) and value > 0
 
 
+def _quote_values_ok(quote) -> bool:
+    """A quote is an observation iff `price` is real and positive AND every
+    load-bearing 52-week field it CARRIES is too.
+
+    `yearHigh`/`yearLow` feed the 52-week-distance signal and leading-stock
+    basket selection (`quote.get("yearHigh", 0)`) — a present NaN suppresses or
+    poisons that signal and a present None raises, while a price-only check
+    accepts both (codex gate r1). Absent fields stay acceptable: consumers see
+    the absence; they cannot see a bad value.
+    """
+    if not _finite_positive(quote.get("price")):
+        return False
+    for key in ("yearHigh", "yearLow"):
+        if key in quote and not _finite_positive(quote.get(key)):
+            return False
+    return True
+
+
 def _history_values_ok(payload) -> bool:
     """All-or-none value check over a normalized ``historical`` payload.
 
@@ -183,6 +201,14 @@ def _history_values_ok(payload) -> bool:
         if not isinstance(bar, dict):
             return False
         if not all(_finite_positive(bar.get(k)) for k in ("open", "high", "low", "close")):
+            return False
+        # A PRESENT adjClose must be real too — downstream consumers prefer it
+        # over close (e.g. `d.get("close", d.get("adjClose", 0))` fallbacks and
+        # macro's monthly downsampling), so a present NaN/None/0 adjClose would
+        # sail past a close-only check and poison the series (codex gate r1).
+        # An ABSENT adjClose stays acceptable: absence is visible to consumers,
+        # a bad value is not.
+        if "adjClose" in bar and not _finite_positive(bar.get("adjClose")):
             return False
         vol = bar.get("volume")
         if not _finite(vol) or vol < 0:
@@ -435,9 +461,7 @@ class FMPClient:
                     # per-symbol records, so filtering (unlike bar-splicing in a
                     # time series) removes nothing positional.
                     kept_quotes = [
-                        q
-                        for q in candidates
-                        if isinstance(q, dict) and _finite_positive(q.get("price"))
+                        q for q in candidates if isinstance(q, dict) and _quote_values_ok(q)
                     ]
                     if not kept_quotes:
                         print(

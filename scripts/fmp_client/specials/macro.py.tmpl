@@ -88,6 +88,14 @@ def _history_values_ok(payload) -> bool:
             return False
         if not all(_finite_positive(bar.get(k)) for k in ("open", "high", "low", "close")):
             return False
+        # A PRESENT adjClose must be real too — downstream consumers prefer it
+        # over close (e.g. `d.get("close", d.get("adjClose", 0))` fallbacks and
+        # macro's monthly downsampling), so a present NaN/None/0 adjClose would
+        # sail past a close-only check and poison the series (codex gate r1).
+        # An ABSENT adjClose stays acceptable: absence is visible to consumers,
+        # a bad value is not.
+        if "adjClose" in bar and not _finite_positive(bar.get("adjClose")):
+            return False
         vol = bar.get("volume")
         if not _finite(vol) or vol < 0:
             return False

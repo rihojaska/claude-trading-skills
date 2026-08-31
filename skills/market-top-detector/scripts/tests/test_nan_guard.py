@@ -316,3 +316,36 @@ def test_single_symbol_quote_drops_unrelated_rows():
     assert result == [{"symbol": "^GSPC", "price": 5000.0}]
     batch = client.get_batch_quotes(["^GSPC"])
     assert set(batch) == {"^GSPC"}
+
+
+def test_quote_values_ok_present_year_fields_must_be_real():
+    # codex gate r1: a present yearHigh/yearLow of NaN/None/0 sailed past the
+    # price-only filter and fed 52-week distance + basket selection.
+    assert fc._quote_values_ok({"price": 100.0, "yearHigh": 120.0, "yearLow": 80.0})
+    assert fc._quote_values_ok({"price": 100.0})  # absent fields acceptable
+    assert not fc._quote_values_ok({"price": 100.0, "yearHigh": NAN})
+    assert not fc._quote_values_ok({"price": 100.0, "yearHigh": None})
+    assert not fc._quote_values_ok({"price": 100.0, "yearLow": 0})
+    assert not fc._quote_values_ok({"price": NAN, "yearHigh": 120.0})
+
+
+def test_fmp_quote_with_nan_year_high_falls_back_to_yf():
+    quotes = [{"symbol": "^GSPC", "price": 5000.0, "yearHigh": NAN}]
+    client, transport = _client_with_fmp({"quote": quotes})
+    with transport, _with_yf([_bar_row(20), _bar_row(21)]):
+        result = client.get_quote("^GSPC")
+    assert result is not None
+    assert result[0]["data_source"] == "yfinance"
+
+
+def test_history_values_ok_present_adjclose_must_be_real():
+    # codex gate r1: consumers prefer adjClose (`d.get("close", d.get("adjClose", 0))`
+    # and macro downsampling) — a present NaN/None/0 adjClose must reject.
+    good = _fmp_bar()
+    good["adjClose"] = 100.0
+    assert fc._history_values_ok(_payload([good]))
+    assert fc._history_values_ok(_payload([_fmp_bar()]))  # absent adjClose acceptable
+    for bad_val in (NAN, None, 0):
+        bad = _fmp_bar()
+        bad["adjClose"] = bad_val
+        assert not fc._history_values_ok(_payload([bad])), bad_val
