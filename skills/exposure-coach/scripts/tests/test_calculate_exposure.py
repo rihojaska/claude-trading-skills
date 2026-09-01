@@ -3,12 +3,14 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from calculate_exposure import (
     CRITICAL_INPUTS,
     INPUT_MAX_AGE_DAYS,
     WEIGHTS,
     assess_input_staleness,
     calculate_composite_score,
+    classify_input_staleness,
     determine_bias,
     determine_confidence,
     determine_exposure_ceiling,
@@ -1148,3 +1150,416 @@ class TestFtdDecisionGradeGate:
         degraded = {"metadata": {"data_coverage": {"decision_grade": False}}}
         assert extract_ftd_score({**degraded, "ftd_score": 70}) == 70
         assert extract_ftd_score({**degraded, "anomaly_level": "low"}) == 80
+
+
+# =========================================================================
+# WPP-20260827-010 — typed input exclusions: absence markers + a
+# non-decision-grade CRITICAL top_risk (D2 of the 2026-09-01 S-PULSE-2 plan)
+# =========================================================================
+
+
+def _marker(days_ago: float = 0.0) -> str:
+    return json.dumps({"schema_version": "1.0", "declared_at": _iso_days_ago(days_ago)})
+
+
+def _pointer(tmp_path, name: str, payload: dict):
+    """Write a pointer JSON and return its path."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+class TestClassifyInputStalenessReasons:
+    """Every exclusion carries a typed reason; the freshness bound is unchanged."""
+
+    def test_fresh_input_is_not_stale_and_carries_no_reason(self, tmp_path):
+        path = _pointer(tmp_path, "breadth", {"generated_at": _iso_days_ago(1)})
+        assert classify_input_staleness("breadth", {"generated_at": _iso_days_ago(1)}, path) == (
+            False,
+            pytest.approx(1.0, abs=0.05),
+            None,
+        )
+
+    def test_aged_out_input_reason_is_age(self, tmp_path):
+        data = {"generated_at": _iso_days_ago(20)}
+        path = _pointer(tmp_path, "breadth", data)
+        is_stale, age, reason = classify_input_staleness("breadth", data, path)
+        assert (is_stale, reason) == (True, "age")
+        assert age == pytest.approx(20.0, abs=0.05)
+
+    def test_undated_input_reason_is_undated(self, tmp_path):
+        data = {"breadth_score": 70}
+        path = _pointer(tmp_path, "breadth", data)
+        assert classify_input_staleness("breadth", data, path) == (True, None, "undated")
+
+    def test_future_dated_input_reason_is_future_dated(self, tmp_path):
+        data = {"generated_at": _iso_days_ago(-10)}
+        path = _pointer(tmp_path, "breadth", data)
+        is_stale, age, reason = classify_input_staleness("breadth", data, path)
+        assert (is_stale, reason) == (True, "future_dated")
+        assert age == pytest.approx(-10.0, abs=0.05)
+
+    def test_absent_input_is_missing_not_stale(self):
+        assert classify_input_staleness("breadth", None, None) == (False, None, None)
+
+    def test_input_max_age_days_is_unchanged(self):
+        """MUTANT: retune the weekly bound instead of adding the marker gate."""
+        assert INPUT_MAX_AGE_DAYS["ftd"] == 8
+        assert INPUT_MAX_AGE_DAYS["top_risk"] == 8
+        assert INPUT_MAX_AGE_DAYS["breadth"] == 8
+        assert INPUT_MAX_AGE_DAYS["regime"] == 35
+
+
+class TestAbsenceMarker:
+    """A producer-written `<name>.absent.json` beside a LOADED pointer means the
+    current cycle produced nothing — the pointer is last cycle's file."""
+
+    def test_seven_day_input_without_marker_stays_fresh(self, tmp_path):
+        """The 8d bound is intact: 7.0d rides free WITHOUT a marker."""
+        data = {"generated_at": _iso_days_ago(7)}
+        path = _pointer(tmp_path, "ftd", data)
+        is_stale, age, reason = classify_input_staleness("ftd", data, path)
+        assert (is_stale, reason) == (False, None)
+        assert age == pytest.approx(7.0, abs=0.05)
+
+    def test_seven_day_input_with_marker_is_stale(self, tmp_path):
+        data = {"generated_at": _iso_days_ago(7)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(_marker(0), encoding="utf-8")
+        is_stale, age, reason = classify_input_staleness("ftd", data, path)
+        assert (is_stale, reason) == (True, "absent_marker")
+        assert age == pytest.approx(7.0, abs=0.05)
+
+    def test_marker_wins_over_an_age_stale_pointer(self, tmp_path):
+        """Precedence pin: absent_marker outranks age when both apply."""
+        data = {"generated_at": _iso_days_ago(9)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(_marker(0), encoding="utf-8")
+        is_stale, age, reason = classify_input_staleness("ftd", data, path)
+        assert (is_stale, reason) == (True, "absent_marker")
+        assert age == pytest.approx(9.0, abs=0.05)
+
+    def test_marker_wins_over_an_undated_pointer(self, tmp_path):
+        data = {"ftd_score": 70}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(_marker(0), encoding="utf-8")
+        assert classify_input_staleness("ftd", data, path) == (True, None, "absent_marker")
+
+    def test_marker_exactly_at_the_pointer_date_is_stale(self, tmp_path):
+        """`declared_at >= internal date` — the boundary is inclusive."""
+        stamp = _iso_days_ago(3)
+        data = {"generated_at": stamp}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(
+            json.dumps({"declared_at": stamp}), encoding="utf-8"
+        )
+        assert classify_input_staleness("ftd", data, path)[2] == "absent_marker"
+
+    def test_marker_older_than_the_pointer_is_ignored(self, tmp_path, capsys):
+        """A manual pointer refresh that bypassed the promoter: the marker is
+        stale evidence about a file that has since been replaced."""
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(_marker(5), encoding="utf-8")
+        is_stale, _age, reason = classify_input_staleness("ftd", data, path)
+        assert (is_stale, reason) == (False, None)
+        assert "ftd.absent.json" in capsys.readouterr().err
+
+    def test_marker_with_no_loaded_pointer_changes_nothing(self, tmp_path):
+        """Missing stays missing — a marker cannot manufacture a stale input."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "ftd.absent.json").write_text(_marker(0), encoding="utf-8")
+        assert classify_input_staleness("ftd", None, tmp_path / "ftd.json") == (
+            False,
+            None,
+            None,
+        )
+
+    def test_malformed_marker_json_fails_closed(self, tmp_path, capsys):
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text("{not json", encoding="utf-8")
+        assert classify_input_staleness("ftd", data, path)[2] == "absent_marker"
+        assert "ftd.absent.json" in capsys.readouterr().err
+
+    def test_non_dict_marker_fails_closed(self, tmp_path, capsys):
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text("[]", encoding="utf-8")
+        assert classify_input_staleness("ftd", data, path)[2] == "absent_marker"
+        assert "ftd.absent.json" in capsys.readouterr().err
+
+    def test_undated_marker_fails_closed(self, tmp_path, capsys):
+        """A marker is a producer-written ABSENCE claim; an unparseable
+        `declared_at` must not silently discard the claim."""
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(
+            json.dumps({"declared_at": "not-a-date"}), encoding="utf-8"
+        )
+        assert classify_input_staleness("ftd", data, path)[2] == "absent_marker"
+        assert "ftd.absent.json" in capsys.readouterr().err
+
+    def test_no_marker_file_means_no_marker(self, tmp_path):
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        assert classify_input_staleness("ftd", data, path)[0] is False
+
+    def test_marker_lookup_needs_a_path(self):
+        data = {"generated_at": _iso_days_ago(1)}
+        assert classify_input_staleness("ftd", data, None) == (
+            False,
+            pytest.approx(1.0, abs=0.05),
+            None,
+        )
+
+
+class TestNonDecisionGradeTopRisk:
+    """A market-top artifact that labels itself non-decision-grade feeds a
+    CRITICAL input at full weight today. Typed exclusion, top_risk only."""
+
+    def _market_top(self, decision_grade=None, days_ago=1):
+        coverage = {"reason": "test"}
+        if decision_grade is not None:
+            coverage["decision_grade"] = decision_grade
+        return {
+            "composite": {"composite_score": 25},
+            "metadata": {"generated_at": _iso_days_ago(days_ago), "data_coverage": coverage},
+        }
+
+    def test_decision_grade_false_is_stale(self, tmp_path):
+        data = self._market_top(False)
+        path = _pointer(tmp_path, "top_risk", data)
+        is_stale, age, reason = classify_input_staleness("top_risk", data, path)
+        assert (is_stale, reason) == (True, "non_decision_grade")
+        assert age == pytest.approx(1.0, abs=0.05)
+
+    def test_decision_grade_true_is_untouched(self, tmp_path):
+        data = self._market_top(True)
+        path = _pointer(tmp_path, "top_risk", data)
+        assert classify_input_staleness("top_risk", data, path)[0] is False
+
+    def test_absent_key_is_not_evidence_of_degradation(self, tmp_path):
+        """MUTANT: gate on falsiness -> every producer without the block goes
+        dark. Absent key = no evidence, untouched."""
+        data = self._market_top(None)
+        path = _pointer(tmp_path, "top_risk", data)
+        assert classify_input_staleness("top_risk", data, path)[0] is False
+        bare = {"composite": {"composite_score": 25}, "generated_at": _iso_days_ago(1)}
+        assert (
+            classify_input_staleness("top_risk", bare, _pointer(tmp_path, "t2", bare))[0] is False
+        )
+
+    def test_ftd_shape_is_never_gated_by_this_reason(self, tmp_path):
+        """MUTANT: drop the `key == "top_risk"` gate -> the FTD payload also
+        carries metadata.data_coverage, so WPP-20260818-009's ratified
+        `False -> absent` contract would silently become `False -> stale`."""
+        data = {
+            "metadata": {
+                "generated_at": _iso_days_ago(1),
+                "data_coverage": {"decision_grade": False},
+            },
+            "quality_score": {"total_score": 95},
+        }
+        path = _pointer(tmp_path, "ftd", data)
+        assert classify_input_staleness("ftd", data, path) == (
+            False,
+            pytest.approx(1.0, abs=0.05),
+            None,
+        )
+
+    def test_marker_outranks_non_decision_grade(self, tmp_path):
+        data = self._market_top(False)
+        path = _pointer(tmp_path, "top_risk", data)
+        (tmp_path / "top_risk.absent.json").write_text(_marker(0), encoding="utf-8")
+        assert classify_input_staleness("top_risk", data, path)[2] == "absent_marker"
+
+
+class TestAssessInputStalenessWrapper:
+    """The ratified (bool, age) surface keeps working; it now wraps the typed
+    classifier so both agree on every shape."""
+
+    def test_wrapper_matches_the_classifier_prefix(self, tmp_path):
+        cases = [
+            ("breadth", {"generated_at": _iso_days_ago(1)}),
+            ("breadth", {"generated_at": _iso_days_ago(30)}),
+            ("breadth", {"breadth_score": 70}),
+            ("top_risk", {"composite": {"composite_score": 25}, "generated_at": _iso_days_ago(1)}),
+        ]
+        pinned = datetime.now(timezone.utc)
+        for i, (key, data) in enumerate(cases):
+            path = _pointer(tmp_path, f"p{i}", data)
+            assert (
+                assess_input_staleness(key, data, path, now=pinned)
+                == (classify_input_staleness(key, data, path, now=pinned)[:2])
+            )
+
+    def test_wrapper_consults_the_marker(self, tmp_path):
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_text(_marker(0), encoding="utf-8")
+        assert assess_input_staleness("ftd", data, path)[0] is True
+
+
+def _run_main_with_markers(tmp_path, inputs, markers):
+    """`_run_main`, with `<key>.absent.json` siblings written first."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for key, body in markers.items():
+        (tmp_path / f"{key}.absent.json").write_text(body, encoding="utf-8")
+    return _run_main(tmp_path, inputs)
+
+
+class TestTypedExclusionEndToEnd:
+    """The whole ladder through main(): haircut, ceiling, eligibility,
+    confidence, typed reason, recommendation."""
+
+    def _base(self):
+        return {
+            "breadth": {"breadth_score": 70, "generated_at": _iso_days_ago(1)},
+            "uptrend": {"uptrend_score": 65, "generated_at": _iso_days_ago(1)},
+            "regime": {"regime": "Broadening", "generated_at": _iso_days_ago(1)},
+        }
+
+    def _top_risk(self, decision_grade=None, days_ago=7):
+        coverage = {"reason": "test"}
+        if decision_grade is not None:
+            coverage["decision_grade"] = decision_grade
+        return {
+            "composite": {"composite_score": 25},
+            "metadata": {"generated_at": _iso_days_ago(days_ago), "data_coverage": coverage},
+        }
+
+    def _renormalized_without_top_risk(self):
+        w = WEIGHTS
+        num = 70 * w["breadth"] + 65 * w["uptrend"] + 80 * w["regime"]
+        return num / (w["breadth"] + w["uptrend"] + w["regime"])
+
+    def _assert_capped_ladder(self, run, reason):
+        assert run["composite_score"] == round(self._renormalized_without_top_risk() - 10, 1)
+        assert run["exposure_ceiling_pct"] == determine_exposure_ceiling(
+            self._renormalized_without_top_risk() - 10
+        )
+        assert run["ceiling_decision_eligible"] is False
+        assert run["confidence"] == "LOW"
+        assert run["recommendation"] == "REDUCE_ONLY"
+        assert run["inputs_stale"] == [
+            {"input": "top_risk", "age_days": run["inputs_stale"][0]["age_days"], "reason": reason}
+        ]
+        assert "top_risk_score" not in run["component_scores"]
+
+    def test_fresh_baseline_is_not_capped(self, tmp_path):
+        run = _run_main(tmp_path, dict(self._base(), top_risk=self._top_risk(True)))
+        assert run["inputs_stale"] == []
+        assert run["ceiling_decision_eligible"] is True
+        assert run["recommendation"] == "NEW_ENTRY_ALLOWED"
+        assert run["component_scores"]["top_risk_score"] == 75
+
+    def test_marker_typed_critical_caps_the_whole_ladder(self, tmp_path):
+        run = _run_main_with_markers(
+            tmp_path,
+            dict(self._base(), top_risk=self._top_risk(True)),
+            {"top_risk": _marker(0)},
+        )
+        self._assert_capped_ladder(run, "absent_marker")
+        assert run["inputs_stale"][0]["age_days"] == pytest.approx(7.0, abs=0.1)
+
+    def test_non_decision_grade_top_risk_caps_the_whole_ladder(self, tmp_path):
+        run = _run_main(tmp_path, dict(self._base(), top_risk=self._top_risk(False)))
+        self._assert_capped_ladder(run, "non_decision_grade")
+
+    def test_marker_run_matches_the_absent_run_on_the_ceiling(self, tmp_path):
+        marker_run = _run_main_with_markers(
+            tmp_path / "marker",
+            dict(self._base(), top_risk=self._top_risk(True)),
+            {"top_risk": _marker(0)},
+        )
+        absent_run = _run_main(tmp_path / "absent", self._base())
+        assert marker_run["composite_score"] == absent_run["composite_score"]
+        assert marker_run["exposure_ceiling_pct"] == absent_run["exposure_ceiling_pct"]
+        assert absent_run["recommendation"] == "NEW_ENTRY_ALLOWED"
+        assert absent_run["inputs_stale"] == []
+
+    def test_non_decision_grade_ftd_stays_missing_not_stale(self, tmp_path):
+        """The FTD contract is unchanged at the main() layer too: a
+        decision_grade:false FTD is ABSENT (extractor returns None), never a
+        typed stale entry."""
+        ftd = {
+            "metadata": {
+                "generated_at": _iso_days_ago(1),
+                "data_coverage": {"decision_grade": False},
+            },
+            "quality_score": {"total_score": 95},
+        }
+        run = _run_main(tmp_path, dict(self._base(), top_risk=self._top_risk(True), ftd=ftd))
+        assert run["inputs_stale"] == []
+        assert "ftd" in run["inputs_missing"]
+        assert "ftd_score" not in run["component_scores"]
+
+    def test_marker_without_a_pointer_leaves_the_input_missing(self, tmp_path):
+        import sys
+
+        from calculate_exposure import main
+
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "top_risk.absent.json").write_text(_marker(0), encoding="utf-8")
+        argv = ["calculate_exposure.py", "--output-dir", str(tmp_path / "reports"), "--json-only"]
+        for key, payload in self._base().items():
+            path = tmp_path / f"{key}.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            argv.extend([f"--{key}", str(path)])
+        argv.extend(["--top-risk", str(tmp_path / "top_risk.json")])
+        original_argv = sys.argv
+        sys.argv = argv
+        try:
+            assert main() == 0
+        finally:
+            sys.argv = original_argv
+        files = sorted((tmp_path / "reports").glob("exposure_posture_*.json"))
+        with open(files[0]) as f:
+            run = json.load(f)
+        assert run["inputs_stale"] == []
+        assert "top_risk" in run["inputs_missing"]
+
+    def test_undated_component_record_does_not_stale_top_risk(self, tmp_path):
+        """D8's orphan-value record is literally {"date": None, "age_days":
+        None, "factor": 0.70}. A string sentinel there would flip the coach to
+        REDUCE_ONLY every run; a null date must be ignored."""
+        top_risk = {
+            "composite": {"composite_score": 25},
+            "metadata": {
+                "generated_at": _iso_days_ago(1),
+                "data_freshness": {
+                    "breadth_200dma": {"date": _iso_days_ago(1), "age_days": 1, "factor": 1.0},
+                    "put_call": {"date": None, "age_days": None, "factor": 0.70},
+                },
+            },
+        }
+        run = _run_main(tmp_path, dict(self._base(), top_risk=top_risk))
+        assert run["inputs_stale"] == []
+        assert run["ceiling_decision_eligible"] is True
+        assert run["component_scores"]["top_risk_score"] == 75
+
+
+class TestStaleReasonRendering:
+    """The markdown disclosure names the reason; legacy entries stay green."""
+
+    def test_reason_is_rendered(self):
+        md = generate_markdown_report(
+            {
+                "generated_at": "2026-09-01T00:00:00+00:00",
+                "exposure_ceiling_pct": 63,
+                "confidence": "LOW",
+                "composite_score": 63.2,
+                "bias": "NEUTRAL",
+                "participation": "MODERATE",
+                "recommendation": "REDUCE_ONLY",
+                "component_scores": {},
+                "inputs_provided": [],
+                "inputs_missing": [],
+                "inputs_stale": [{"input": "top_risk", "age_days": 7.0, "reason": "absent_marker"}],
+                "ceiling_decision_eligible": False,
+                "rationale": "test",
+            }
+        )
+        assert "top_risk (7.0d, absent_marker)" in md

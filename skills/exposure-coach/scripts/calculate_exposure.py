@@ -165,6 +165,146 @@ def extract_input_date(data: Optional[dict]) -> Optional[datetime]:
     return None
 
 
+def _absent_marker_path(path: Optional[Path]) -> Optional[Path]:
+    """Sibling absence-marker path for a `.json` pointer, else None.
+
+    `reports/ftd_latest.json` -> `reports/ftd_latest.absent.json`.
+    """
+    if path is None or not path.name.endswith(".json"):
+        return None
+    return path.with_name(path.name[:-5] + ".absent.json")
+
+
+def _absent_marker_applies(path: Optional[Path], internal: Optional[datetime]) -> bool:
+    """True when a producer-written absence marker governs this pointer.
+
+    The promoter (`scripts/promote_pulse_latest.py`, WPP-20260827-010) writes
+    `<target>.absent.json` when NO current-cycle artifact could be promoted and
+    leaves the previous cycle's pointer in place — other consumers keep a
+    stale-but-real file rather than silently losing it. Marker presence
+    therefore means exactly "the file beside me is not this cycle's".
+
+    A marker declared BEFORE the pointer's own internal date is about a file
+    that has since been replaced (a manual refresh that bypassed the promoter):
+    ignored, with a note. A marker that cannot be parsed is treated as
+    present-but-unreadable and fails CLOSED — it is an explicit absence claim,
+    and discarding it would restore the exact silent-staleness the marker
+    exists to end (P5).
+    """
+    marker_path = _absent_marker_path(path)
+    if marker_path is None or not marker_path.exists():
+        return False
+    try:
+        with open(marker_path) as f:
+            marker = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            f"Warning: absence marker {marker_path} is unreadable ({e}); "
+            "treating the input as absent (fail-closed)",
+            file=sys.stderr,
+        )
+        return True
+    if not isinstance(marker, dict):
+        print(
+            f"Warning: absence marker {marker_path} is not a JSON object; "
+            "treating the input as absent (fail-closed)",
+            file=sys.stderr,
+        )
+        return True
+    declared = _parse_timestamp(marker.get("declared_at"))
+    if declared is None:
+        print(
+            f"Warning: absence marker {marker_path} carries no parseable "
+            "declared_at; treating the input as absent (fail-closed)",
+            file=sys.stderr,
+        )
+        return True
+    if internal is None or declared >= internal:
+        return True
+    print(
+        f"Note: ignoring absence marker {marker_path} — it was declared before "
+        "the pointer's own date, so the pointer has since been refreshed",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _is_non_decision_grade(key: str, data: dict) -> bool:
+    """True for a market-top artifact that labels itself non-decision-grade.
+
+    Scoped to `top_risk` BY KEY, not by shape: the ftd-detector payload also
+    carries `metadata.data_coverage`, and its `decision_grade is False`
+    contract is ratified as ABSENT (`extract_ftd_score` returns None,
+    WPP-20260818-009) — routing it here instead would silently re-type that
+    input. An ABSENT `decision_grade` key is not evidence of degradation.
+    """
+    if key != "top_risk":
+        return False
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    coverage = metadata.get("data_coverage")
+    market_top_shape = isinstance(data.get("composite"), dict) or isinstance(coverage, dict)
+    if not market_top_shape or not isinstance(coverage, dict):
+        return False
+    return coverage.get("decision_grade") is False
+
+
+def classify_input_staleness(
+    key: str,
+    data: Optional[dict],
+    path: Optional[Path] = None,
+    now: Optional[datetime] = None,
+) -> tuple[bool, Optional[float], Optional[str]]:
+    """Age one loaded input and TYPE the exclusion.
+
+    Returns (is_stale, age_days, reason) where reason is one of
+    ``age`` · ``undated`` · ``future_dated`` · ``absent_marker`` ·
+    ``non_decision_grade``, or None when the input is not stale.
+
+    Internal-date-first and fail-closed: an input carrying no resolvable date is
+    stale with age None ("undated"). These sidecars are git-tracked, so a
+    checkout resets mtime — an mtime read can only *age* an input here, never
+    freshen one. An absent input is missing, not stale.
+
+    Precedence, pinned by test: absent_marker > non_decision_grade >
+    future_dated > undated > age. The two producer-written claims outrank the
+    date arithmetic because they say WHY the evidence is unusable; the age
+    bound (INPUT_MAX_AGE_DAYS) is untouched by either.
+    """
+    if data is None:
+        return False, None, None
+    now = now or datetime.now(timezone.utc)
+    internal = extract_input_date(data)
+    age_days: Optional[float] = None
+    future_dated = False
+    if internal is not None:
+        age_days = (now - internal).total_seconds() / 86400.0
+        if age_days < -2:
+            # A materially future-dated input is corrupt evidence, not fresh
+            # evidence — beyond ~2d of clock skew it fails closed (codex gate
+            # P2). The mtime floor is deliberately NOT applied here: it would
+            # mask the corruption behind a plausible age.
+            future_dated = True
+        elif path is not None:
+            try:
+                mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                mtime = None
+            if mtime is not None:
+                age_days = max(age_days, (now - mtime).total_seconds() / 86400.0)
+
+    if _absent_marker_applies(path, internal):
+        return True, age_days, "absent_marker"
+    if _is_non_decision_grade(key, data):
+        return True, age_days, "non_decision_grade"
+    if future_dated:
+        return True, age_days, "future_dated"
+    if internal is None:
+        return True, None, "undated"
+    if age_days > INPUT_MAX_AGE_DAYS.get(key, 8):
+        return True, age_days, "age"
+    return False, age_days, None
+
+
 def assess_input_staleness(
     key: str,
     data: Optional[dict],
@@ -173,30 +313,10 @@ def assess_input_staleness(
 ) -> tuple[bool, Optional[float]]:
     """Age one loaded input against INPUT_MAX_AGE_DAYS. Returns (is_stale, age_days).
 
-    Internal-date-first and fail-closed: an input carrying no resolvable date is
-    stale with age None ("undated"). These sidecars are git-tracked, so a
-    checkout resets mtime — an mtime read can only *age* an input here, never
-    freshen one. An absent input is missing, not stale.
+    Thin wrapper over `classify_input_staleness` — the ratified two-value
+    surface, which now also consults the sibling absence marker.
     """
-    if data is None:
-        return False, None
-    now = now or datetime.now(timezone.utc)
-    internal = extract_input_date(data)
-    if internal is None:
-        return True, None
-    age_days = (now - internal).total_seconds() / 86400.0
-    if age_days < -2:
-        # A materially future-dated input is corrupt evidence, not fresh
-        # evidence — beyond ~2d of clock skew it fails closed (codex gate P2).
-        return True, age_days
-    if path is not None:
-        try:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-        except OSError:
-            mtime = None
-        if mtime is not None:
-            age_days = max(age_days, (now - mtime).total_seconds() / 86400.0)
-    return age_days > INPUT_MAX_AGE_DAYS.get(key, 8), age_days
+    return classify_input_staleness(key, data, path, now=now)[:2]
 
 
 def extract_breadth_score(data: Optional[dict]) -> Optional[int]:
@@ -662,7 +782,14 @@ def generate_markdown_report(result: dict) -> str:
         rendered = []
         for entry in stale_inputs:
             age = entry.get("age_days")
-            rendered.append(f"{entry['input']} ({'undated' if age is None else f'{age}d'})")
+            # `reason` is read defensively: results written before the typing
+            # pass carry an age only, and an absent_marker exclusion at 7.0d
+            # would otherwise read as an ordinary (sub-bound) age.
+            detail = "undated" if age is None else f"{age}d"
+            reason = entry.get("reason")
+            if reason and reason not in ("age", "undated"):
+                detail = f"{detail}, {reason}"
+            rendered.append(f"{entry['input']} ({detail})")
         lines.append(f"⚠ Stale inputs (excluded from the composite): {', '.join(rendered)}")
     if result.get("ceiling_decision_eligible") is False:
         lines.append("⚠ Ceiling is advisory only — a critical input is stale.")
@@ -821,12 +948,14 @@ def main():
         "sector": (sector_data, args.sector),
     }
     stale_ages: dict[str, Optional[float]] = {}
+    stale_reasons: dict[str, Optional[str]] = {}
     for key, (data, path) in input_paths.items():
         if data is None:
             continue
-        is_stale, age_days = assess_input_staleness(key, data, path, now=freshness_now)
+        is_stale, age_days, reason = classify_input_staleness(key, data, path, now=freshness_now)
         if is_stale:
             stale_ages[key] = age_days
+            stale_reasons[key] = reason
     stale = sorted(stale_ages)
 
     # A stale input is dropped from every downstream calculation exactly like a
@@ -883,6 +1012,7 @@ def main():
             {
                 "input": k,
                 "age_days": None if stale_ages[k] is None else round(stale_ages[k], 1),
+                "reason": stale_reasons[k],
             }
             for k in stale
         ],

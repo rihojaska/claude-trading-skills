@@ -60,7 +60,14 @@ The script accepts partial inputs; missing files reduce confidence but do not bl
 
 **Deprecated flag:** `--institutional` is still accepted for CLI compatibility (institutional-flow-tracker was retired, WPP-20260825-006) but is fully ignored — passing it prints a stderr deprecation warning and has no effect on scoring, weights, or output.
 
-**Freshness contract:** Each input is aged against its own internal date — actual DATA dates first (`data_date` / `as_of` / `metadata.latest_data_date` / `metadata.data_freshness.latest_date`), with `generated_at` only as a last resort, so a report regenerated from old market data cannot read fresh. An input older than its `INPUT_MAX_AGE_DAYS` bound — or carrying no date at all — is stale: it is excluded from the composite exactly like a missing input, the remaining weights are renormalized, and it is listed in `inputs_stale` (`age_days: null` means undated). Any stale input caps confidence at MEDIUM; a stale critical input (`regime`, `top_risk`, `breadth`) caps it at LOW and sets `ceiling_decision_eligible: false` — the ceiling is still rendered, but as advisory context rather than a decision input.
+**Freshness contract:** Each input is aged against its own internal date — actual DATA dates first (`data_date` / `as_of` / `metadata.latest_data_date` / `metadata.data_freshness.latest_date`), with `generated_at` only as a last resort, so a report regenerated from old market data cannot read fresh. An input older than its `INPUT_MAX_AGE_DAYS` bound — or carrying no date at all — is stale: it is excluded from the composite exactly like a missing input, the remaining weights are renormalized, and it is listed in `inputs_stale` (`age_days: null` means undated). Each entry carries a typed `reason` ∈ {`age`, `undated`, `future_dated`, `absent_marker`, `non_decision_grade`}. Any stale input caps confidence at MEDIUM; a stale critical input (`regime`, `top_risk`, `breadth`) caps it at LOW and sets `ceiling_decision_eligible: false` — the ceiling is still rendered, but as advisory context rather than a decision input.
+
+**Typed exclusions beyond age (WPP-20260827-010):** two producer-written claims exclude an input regardless of its age, and neither changes `INPUT_MAX_AGE_DAYS`.
+
+- `absent_marker` — a sibling `<pointer>.absent.json` (written by `scripts/promote_pulse_latest.py` when no current-cycle artifact could be promoted) whose `declared_at` is on/after the pointer's own internal date. The pointer is left in place for other consumers, so marker presence is the only signal that the file beside it belongs to a previous cycle. A marker declared *before* the pointer's date is ignored with a stderr note; an unreadable or `declared_at`-less marker fails closed; a marker with no loaded pointer changes nothing (missing stays missing).
+- `non_decision_grade` — a `--top-risk` market-top artifact whose `metadata.data_coverage.decision_grade` is `false`. Scoped to `top_risk` by key: the ftd-detector's identical label is ratified as ABSENT (the extractor returns `None`, WPP-20260818-009), not stale.
+
+Precedence when several apply: `absent_marker` > `non_decision_grade` > `future_dated` > `undated` > `age`.
 
 **Verification pitfall:** After each run, inspect the generated JSON fields `inputs_provided`, `inputs_missing`, and `inputs_stale` (a supplied input that was aged out appears in none of the first two). If a file you passed on the CLI still appears in `inputs_missing` (for example a theme-detector JSON that the exposure engine did not recognize), report the affected dimension as degraded and keep confidence capped; do not assume the supplied input was incorporated just because the CLI argument was present.
 
@@ -107,7 +114,7 @@ Map the posture recommendation to portfolio actions:
   },
   "inputs_provided": ["breadth", "uptrend", "regime", "top_risk"],
   "inputs_missing": ["ftd", "sector"],
-  "inputs_stale": [{"input": "theme", "age_days": null}],
+  "inputs_stale": [{"input": "theme", "age_days": null, "reason": "undated"}],
   "ceiling_decision_eligible": true,
   "rationale": "Broad participation with low top risk supports elevated exposure."
 }
