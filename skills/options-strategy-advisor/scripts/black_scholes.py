@@ -29,7 +29,6 @@ Author: Claude Trading Skills
 Version: 1.0
 """
 
-import os
 import sys
 from pathlib import Path
 
@@ -42,9 +41,10 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 try:
-    from fmp_compat import fmp_get
+    from fmp_compat import fmp_get, key_override
 except ImportError:  # standalone .skill install without the repo-root module
     fmp_get = None
+    key_override = None
     print(
         "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
         "dual-key failover unavailable.",
@@ -67,19 +67,15 @@ def _fmp_json(url, params, api_key):
     """One FMP GET returning parsed JSON, or None.
 
     Prefers `fmp_compat.fmp_get` (dual-key failover on rate-limit signals).
-    A caller-supplied `api_key` is exported into the environment because
-    fmp_get reads its keys from there; the direct fallback keeps sending it as
-    an `apikey` header.
-
-    Explicit assignment, not setdefault: importing fmp_compat self-loads the
-    house credential file at import, so FMP_API_KEY is ALWAYS already set by
-    the time this runs and a setdefault could never fire - the caller-supplied
-    credential was silently discarded (codex gate P2).
+    A caller-supplied `api_key` reaches fmp_get through the environment because
+    that is where fmp_get reads its keys, scoped to this one call by
+    `fmp_compat.key_override` — see its docstring for why a process-global
+    assignment was wrong. The direct fallback keeps sending it as an `apikey`
+    header.
     """
-    if api_key:
-        os.environ["FMP_API_KEY"] = api_key
     if fmp_get is not None:
-        return fmp_get(url, params=params, timeout=30)
+        with key_override(api_key):
+            return fmp_get(url, params=params, timeout=30)
     resp = requests.get(url, headers={"apikey": api_key}, params=params, timeout=30)
     if resp.status_code != 200:
         return None

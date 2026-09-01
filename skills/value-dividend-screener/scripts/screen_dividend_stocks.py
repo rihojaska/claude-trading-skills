@@ -40,9 +40,10 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 try:
-    from fmp_compat import fmp_get
+    from fmp_compat import fmp_get, key_override
 except ImportError:  # standalone .skill install without the repo-root module
     fmp_get = None
+    key_override = None
     print(
         "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
         "dual-key failover unavailable.",
@@ -215,14 +216,10 @@ class FMPClient:
     )
 
     def __init__(self, api_key: str):
+        # The caller-supplied key is applied per CALL (see `_request`), never
+        # assigned to the environment here: a process-global assignment made the
+        # last client constructed own every later call in the interpreter.
         self.api_key = api_key
-        if api_key:
-            # Explicit assignment, not setdefault: importing fmp_compat
-            # self-loads the house credential file at import, so FMP_API_KEY is
-            # ALWAYS already set by the time this runs and a setdefault could
-            # never fire - the caller-supplied credential was silently
-            # discarded (codex gate P2).
-            os.environ["FMP_API_KEY"] = api_key
         self.session = requests.Session()
         self.session.headers.update({"apikey": self.api_key})
         self.rate_limit_reached = False
@@ -252,6 +249,10 @@ class FMPClient:
 
         `quiet=True` suppresses the WARNING line for callers that handle a
         miss themselves (the circuit-breakered historical fetch).
+
+        `key_override` scopes this client's key to the call — fmp_get reads its
+        credentials from the environment, and a process-global assignment made
+        the last client constructed own every later call (codex gate P2).
         """
         if self.rate_limit_reached:
             return None
@@ -260,7 +261,8 @@ class FMPClient:
             params = {}
 
         if fmp_get is not None:
-            result = fmp_get(url, params=params, timeout=30)
+            with key_override(self.api_key):
+                result = fmp_get(url, params=params, timeout=30)
         else:
             result = self._raw_stable_get(url, params)
         time.sleep(0.3)  # Rate limiting: ~3 requests/second

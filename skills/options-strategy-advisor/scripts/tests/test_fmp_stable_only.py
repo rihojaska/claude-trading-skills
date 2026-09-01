@@ -116,8 +116,9 @@ class TestAdapter:
 
 @pytest.fixture(autouse=True)
 def _isolate_fmp_env(monkeypatch):
-    """The adapter now ASSIGNS FMP_API_KEY (see TestCallerKeyWins), so every
-    construction would otherwise leak a key into the rest of the session."""
+    """A house credential is always present in production (fmp_compat self-loads
+    it at import), so the caller-key tests below need a known ambient baseline
+    to override AND to be restored to."""
     monkeypatch.setenv("FMP_API_KEY", "ambient-house-key")
     monkeypatch.setenv("FMP_FALLBACK_API_KEY", "ambient-fallback")
 
@@ -171,9 +172,10 @@ class TestEmptyHistoricalIsAMiss:
 
 
 class TestCallerKeyWins:
-    """`setdefault` could never fire: importing fmp_compat self-loads the house
-    credential at import, so FMP_API_KEY is always already set. A
-    caller-supplied credential must OVERRIDE the ambient one."""
+    """A caller-supplied credential must OVERRIDE the ambient house key for the
+    duration of the call, and MUST NOT outlive it: a process-global assignment
+    made two callers passing different keys share the last one written (codex
+    gate P2). The scoping lives in `fmp_compat.key_override`."""
 
     def _keys_seen(self, monkeypatch):
         seen = []
@@ -184,12 +186,20 @@ class TestCallerKeyWins:
         )
         return seen
 
-    def test_caller_key_overrides_a_preset_ambient_key(self, monkeypatch):
+    def test_caller_key_is_in_effect_during_the_call(self, monkeypatch):
         seen = self._keys_seen(monkeypatch)
         black_scholes.get_current_stock_price("AAPL", "caller-key")
         assert seen and seen[0][0] == "caller-key"
+
+    def test_ambient_key_is_restored_after_the_call(self, monkeypatch):
+        """MUTANT: assign the caller key process-globally -> the NEXT call, made
+        by a different caller with a different key, silently uses this one."""
+        self._keys_seen(monkeypatch)
+        black_scholes.get_current_stock_price("AAPL", "caller-key")
+        assert fmp_compat.get_fmp_keys()[0] == "ambient-house-key"
 
     def test_no_caller_key_leaves_the_ambient_key_alone(self, monkeypatch):
         seen = self._keys_seen(monkeypatch)
         black_scholes.get_current_stock_price("AAPL", "")
         assert seen and seen[0][0] == "ambient-house-key"
+        assert fmp_compat.get_fmp_keys()[0] == "ambient-house-key"

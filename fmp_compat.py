@@ -41,6 +41,7 @@ import os
 import re
 import sys
 import time
+from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -305,6 +306,38 @@ def get_fmp_keys() -> list[str]:
     if fallback and fallback != primary:
         keys.append(fallback)
     return keys
+
+
+@contextmanager
+def key_override(api_key: str | None):
+    """Scope a caller-supplied FMP key to the calls made inside the block.
+
+    `fmp_get` reads its credentials from the environment, so a caller-supplied
+    key has to reach it that way. Assigning FMP_API_KEY process-globally (what
+    the four fmp-routed skills used to do, at construction or call time) makes
+    the LAST key written silently own every later call in the interpreter, no
+    matter which adapter issued it (codex gate P2, 2026-09-02). Scoping the
+    assignment to the call keeps two adapters with two keys independent.
+
+    Env-scoped, so it is sequential-only: two THREADS overlapping inside this
+    manager would restore each other's key. No fmp-routed caller threads today.
+
+    A falsy key is a no-op: the ambient house credential stays in charge.
+    FMP_FALLBACK_API_KEY is never touched — the caller overrides the primary
+    credential, not the failover rung behind it.
+    """
+    if not api_key:
+        yield
+        return
+    previous = os.environ.get("FMP_API_KEY")
+    os.environ["FMP_API_KEY"] = api_key
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("FMP_API_KEY", None)
+        else:
+            os.environ["FMP_API_KEY"] = previous
 
 
 def _looks_like_quota_error(response: requests.Response) -> bool:

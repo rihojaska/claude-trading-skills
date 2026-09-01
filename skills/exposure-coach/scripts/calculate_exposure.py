@@ -225,7 +225,11 @@ def _absent_marker_applies(
     try:
         with open(marker_path) as f:
             marker = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, ValueError) as e:
+        # ValueError, not json.JSONDecodeError: a marker written in a non-UTF-8
+        # encoding raises UnicodeDecodeError, which JSONDecodeError does not
+        # cover, so the coach ABORTED instead of honouring the documented
+        # fail-closed absence claim (codex gate P2). Both subclass ValueError.
         print(
             f"Warning: absence marker {marker_path} is unreadable ({e}); "
             "treating the input as absent (fail-closed)",

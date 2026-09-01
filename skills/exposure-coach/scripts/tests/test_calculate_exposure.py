@@ -1284,6 +1284,16 @@ class TestAbsenceMarker:
         assert classify_input_staleness("ftd", data, path)[2] == "absent_marker"
         assert "ftd.absent.json" in capsys.readouterr().err
 
+    def test_invalid_utf8_marker_fails_closed(self, tmp_path, capsys):
+        """MUTANT: catch `json.JSONDecodeError` only -> `json.load` raises
+        UnicodeDecodeError on a non-UTF-8 marker and the coach ABORTS instead of
+        honouring the documented fail-closed absence claim."""
+        data = {"generated_at": _iso_days_ago(1)}
+        path = _pointer(tmp_path, "ftd", data)
+        (tmp_path / "ftd.absent.json").write_bytes(b"\xff\xfe{")
+        assert classify_input_staleness("ftd", data, path)[2] == "absent_marker"
+        assert "ftd.absent.json" in capsys.readouterr().err
+
     def test_non_dict_marker_fails_closed(self, tmp_path, capsys):
         data = {"generated_at": _iso_days_ago(1)}
         path = _pointer(tmp_path, "ftd", data)

@@ -9,7 +9,6 @@ PE ratio, volume ratios.
 FMP API key is optional; without it, yfinance is used exclusively.
 """
 
-import os
 import sys
 import time
 from datetime import date, timedelta
@@ -42,9 +41,10 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 try:
-    from fmp_compat import fmp_get
+    from fmp_compat import fmp_get, key_override
 except ImportError:  # standalone .skill install without the repo-root module
     fmp_get = None
+    key_override = None
     print(
         "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
         "dual-key failover unavailable.",
@@ -120,9 +120,14 @@ def _fmp_fetch(url: str, params: dict, api_key: str) -> Any:
     rate-limit signals). Falls back to a direct /stable request when the
     repo-root shim is not importable (standalone .skill install), which has no
     key failover.
+
+    A caller-supplied key reaches fmp_get through the environment, scoped to
+    this one call by `fmp_compat.key_override` — see its docstring for why a
+    process-global assignment was wrong.
     """
     if fmp_get is not None:
-        return fmp_get(url, params=params, timeout=15)
+        with key_override(api_key):
+            return fmp_get(url, params=params, timeout=15)
     if not HAS_REQUESTS:
         return None
     resp = _requests_lib.get(url, params=params, headers={"apikey": api_key}, timeout=15)
@@ -147,16 +152,10 @@ class ETFScanner:
 
     def __init__(self, fmp_api_key: Optional[str] = None, rate_limit_sec: float = 0.3):
         self._cache: dict[str, pd.DataFrame] = {}
+        # The caller-supplied key is applied per CALL (see `_fmp_fetch`), never
+        # assigned to the environment here: a process-global assignment made the
+        # last scanner constructed own every later call in the interpreter.
         self._fmp_api_key = fmp_api_key
-        if fmp_api_key:
-            # fmp_get() reads its keys from the environment; honour a
-            # caller-supplied key without changing that signature.
-            # Explicit assignment, not setdefault: importing fmp_compat
-            # self-loads the house credential file at import, so FMP_API_KEY is
-            # ALWAYS already set by the time this runs and a setdefault could
-            # never fire - the caller-supplied credential was silently
-            # discarded (codex gate P2).
-            os.environ["FMP_API_KEY"] = fmp_api_key
         self._rate_limit_sec = rate_limit_sec
         self._last_request_time = 0.0
         self._fmp_quote_cache: dict[str, dict] = {}  # normalized_symbol -> quote dict

@@ -150,25 +150,50 @@ class TestAdapter:
 
 @pytest.fixture(autouse=True)
 def _isolate_fmp_env(monkeypatch):
-    """The constructor now ASSIGNS FMP_API_KEY (see TestCallerKeyWins), so every
-    FMPClient construction would otherwise leak a key into the rest of the
-    session."""
+    """A house credential is always present in production (fmp_compat self-loads
+    it at import), so the caller-key tests below need a known ambient baseline
+    to override AND to be restored to."""
     monkeypatch.setenv("FMP_API_KEY", "ambient-house-key")
     monkeypatch.setenv("FMP_FALLBACK_API_KEY", "ambient-fallback")
 
 
 class TestCallerKeyWins:
-    """`setdefault` could never fire: importing fmp_compat self-loads the house
-    credential at import, so FMP_API_KEY is always already set. A
-    caller-supplied credential must OVERRIDE the ambient one."""
+    """A caller-supplied credential must OVERRIDE the ambient house key for the
+    duration of the call, and MUST NOT outlive it: a process-global assignment
+    made two clients built with different keys share the last one written
+    (codex gate P2). The scoping lives in `fmp_compat.key_override`."""
 
-    def test_caller_key_overrides_a_preset_ambient_key(self):
-        FMPClient("caller-key")
-        assert fmp_compat.get_fmp_keys()[0] == "caller-key"
+    @staticmethod
+    def _keys_seen(monkeypatch):
+        seen = []
+        monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+        monkeypatch.setattr(
+            mod,
+            "fmp_get",
+            lambda *_a, **_k: seen.append(fmp_compat.get_fmp_keys()) or None,
+        )
+        return seen
 
-    def test_empty_caller_key_leaves_the_ambient_key_alone(self):
-        FMPClient("")
+    def test_caller_key_is_in_effect_during_the_call(self, monkeypatch):
+        seen = self._keys_seen(monkeypatch)
+        FMPClient("caller-key")._request(f"{FMPClient.STABLE_URL}/quote", {"symbol": "AAPL"})
+        assert seen and seen[0][0] == "caller-key"
+
+    def test_ambient_key_is_restored_after_the_call(self, monkeypatch):
+        self._keys_seen(monkeypatch)
+        FMPClient("caller-key")._request(f"{FMPClient.STABLE_URL}/quote", {"symbol": "AAPL"})
         assert fmp_compat.get_fmp_keys()[0] == "ambient-house-key"
+
+    def test_construction_alone_never_touches_the_ambient_key(self):
+        """MUTANT: keep the constructor assignment -> a second client built with
+        a different key silently re-points the first one's calls."""
+        FMPClient("caller-key")
+        assert fmp_compat.get_fmp_keys()[0] == "ambient-house-key"
+
+    def test_empty_caller_key_leaves_the_ambient_key_alone(self, monkeypatch):
+        seen = self._keys_seen(monkeypatch)
+        FMPClient("")._request(f"{FMPClient.STABLE_URL}/quote", {"symbol": "AAPL"})
+        assert seen and seen[0][0] == "ambient-house-key"
 
 
 class TestStandaloneStableTransport:
