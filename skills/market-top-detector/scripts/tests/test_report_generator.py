@@ -217,3 +217,43 @@ class TestMarkdownReportWithDelta:
             assert "First run" in content
         finally:
             os.unlink(path)
+
+
+class TestBuildDataCoverage:
+    """Pin the decision_grade rule: zero missing components, or it is not decision-grade."""
+
+    @staticmethod
+    def _availability(*missing: str) -> dict:
+        names = [
+            "distribution_days",
+            "leading_stocks",
+            "defensive_rotation",
+            "breadth_divergence",
+            "index_technical",
+            "sentiment",
+        ]
+        return {name: name not in missing for name in names}
+
+    def test_zero_missing_is_decision_grade(self):
+        from market_top_detector import build_data_coverage
+
+        coverage = build_data_coverage(self._availability(), {"SPY": "fmp"})
+        assert coverage["decision_grade"] is True
+        assert coverage["reason"] == "All components available"
+        assert coverage["symbol_sources"] == {"SPY": "fmp"}
+        assert coverage["component_availability"] == self._availability()
+
+    def test_one_missing_is_not_decision_grade(self):
+        from market_top_detector import build_data_coverage
+
+        coverage = build_data_coverage(self._availability("sentiment"), {})
+        assert coverage["decision_grade"] is False
+        assert coverage["reason"] == "Missing/non-decision-grade components: sentiment"
+
+    def test_two_missing_is_not_decision_grade(self):
+        from market_top_detector import build_data_coverage
+
+        coverage = build_data_coverage(self._availability("sentiment", "leading_stocks"), {})
+        assert coverage["decision_grade"] is False
+        assert "sentiment" in coverage["reason"]
+        assert "leading_stocks" in coverage["reason"]

@@ -139,7 +139,81 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def compute_data_freshness(date_args: dict) -> dict:
+def build_data_coverage(data_availability: dict, symbol_sources: dict) -> dict:
+    """
+    Build the data_coverage block stamped into report metadata.
+
+    An analysis is decision-grade only when EVERY component was available.
+    A single missing component silently removes a whole leg of the composite,
+    so "nearly all" is not a decision-grade label.
+
+    Args:
+        data_availability: component name -> bool (was the component computed?).
+        symbol_sources: per-symbol data-source map from the API client stats.
+    """
+    missing_components = [name for name, available in data_availability.items() if not available]
+    return {
+        "decision_grade": not missing_components,
+        "reason": f"Missing/non-decision-grade components: {', '.join(missing_components)}"
+        if missing_components
+        else "All components available",
+        "component_availability": data_availability,
+        "symbol_sources": symbol_sources,
+    }
+
+
+# Value flag <-> date flag pairs. Keyed by freshness label; the value dest does
+# not always match the label (--margin-debt-yoy dates via --margin-debt-date).
+# --vix-term has no date partner and is excluded by design.
+_FLAG_PAIRS = {
+    "breadth_200dma": ("breadth_200dma", "breadth_200dma_date"),
+    "breadth_50dma": ("breadth_50dma", "breadth_50dma_date"),
+    "put_call": ("put_call", "put_call_date"),
+    "margin_debt": ("margin_debt_yoy", "margin_debt_date"),
+}
+
+
+def _cli_flag(dest: str) -> str:
+    return "--" + dest.replace("_", "-")
+
+
+def _reconcile_flag_pairs(args) -> set[str]:
+    """
+    Reconcile half-supplied value/date CLI flag pairs, in place, on raw args.
+
+    A date without its value is a phantom: it would contribute a freshness
+    record (and could stale a downstream consumer) for an input that was never
+    scored, so it is dropped. A value without its date is real but undated, so
+    it is kept and reported back for a typed 0.70 freshness leg.
+
+    Returns:
+        The set of freshness labels whose value is present but undated.
+    """
+    undated_present = set()
+
+    for label, (value_dest, date_dest) in _FLAG_PAIRS.items():
+        value = getattr(args, value_dest, None)
+        date_value = getattr(args, date_dest, None)
+
+        if value is None and date_value is not None:
+            print(
+                f"WARNING: {_cli_flag(date_dest)} given without {_cli_flag(value_dest)}; "
+                f"dropping the orphan date (no {label} value accompanies it).",
+                file=sys.stderr,
+            )
+            setattr(args, date_dest, None)
+        elif value is not None and date_value is None:
+            print(
+                f"WARNING: {_cli_flag(value_dest)} given without {_cli_flag(date_dest)}; "
+                f"keeping the value but scoring {label} as undated (freshness factor 0.70).",
+                file=sys.stderr,
+            )
+            undated_present.add(label)
+
+    return undated_present
+
+
+def compute_data_freshness(date_args: dict, undated_present=()) -> dict:
     """
     Compute data freshness factors for CLI input dates.
 
@@ -149,6 +223,10 @@ def compute_data_freshness(date_args: dict) -> dict:
     Args:
         date_args: Dict with keys like 'breadth_200dma_date', 'breadth_50dma_date',
                    'put_call_date', 'margin_debt_date' -> YYYY-MM-DD strings.
+        undated_present: Freshness labels whose value was supplied without a date.
+                   Each gets a literal {"date": None, ...} record at factor 0.70 so
+                   the missing provenance deflates overall_confidence instead of
+                   riding free. A label carrying a real date in date_args wins.
 
     Returns:
         Dict with per-input freshness info and overall_confidence (min of all factors).
@@ -198,6 +276,14 @@ def compute_data_freshness(date_args: dict) -> dict:
 
         result[label] = {"date": date_str, "age_days": biz_days, "factor": factor}
         factors.append(factor)
+
+    for label in undated_present:
+        if label in result:
+            # A real date was supplied for this label after reconciliation
+            # (e.g. the auto-breadth fetch); the dated record wins.
+            continue
+        result[label] = {"date": None, "age_days": None, "factor": 0.70}
+        factors.append(0.70)
 
     result["overall_confidence"] = min(factors) if factors else 1.0
     return result
@@ -277,6 +363,9 @@ def _compute_deltas(current_scores: dict[str, float], previous_report: Optional[
 
 def main():
     args = parse_arguments()
+    # Reconcile half-supplied value/date flag pairs on the RAW args, before the
+    # FMP client and before the auto-breadth branch (which still wins afterwards).
+    undated_inputs = _reconcile_flag_pairs(args)
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("=" * 70)
@@ -468,7 +557,7 @@ def main():
         "put_call_date": args.put_call_date,
         "margin_debt_date": args.margin_debt_date,
     }
-    data_freshness = compute_data_freshness(freshness_args)
+    data_freshness = compute_data_freshness(freshness_args, undated_present=undated_inputs)
 
     # ========================================================================
     # Step 3: Composite Score
@@ -495,15 +584,9 @@ def main():
     }
 
     composite = calculate_composite_score(component_scores, data_availability)
-    missing_components = [name for name, available in data_availability.items() if not available]
-    data_coverage = {
-        "decision_grade": len(missing_components) <= 1,
-        "reason": "All or nearly all components available"
-        if len(missing_components) <= 1
-        else f"Missing/non-decision-grade components: {', '.join(missing_components)}",
-        "component_availability": data_availability,
-        "symbol_sources": client.get_api_stats().get("data_sources", {}),
-    }
+    data_coverage = build_data_coverage(
+        data_availability, client.get_api_stats().get("data_sources", {})
+    )
 
     print(f"  Composite Score: {composite['composite_score']}/100")
     print(f"  Risk Zone: {composite['zone']}")
