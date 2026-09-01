@@ -70,9 +70,14 @@ def _fmp_json(url, params, api_key):
     A caller-supplied `api_key` is exported into the environment because
     fmp_get reads its keys from there; the direct fallback keeps sending it as
     an `apikey` header.
+
+    Explicit assignment, not setdefault: importing fmp_compat self-loads the
+    house credential file at import, so FMP_API_KEY is ALWAYS already set by
+    the time this runs and a setdefault could never fire - the caller-supplied
+    credential was silently discarded (codex gate P2).
     """
     if api_key:
-        os.environ.setdefault("FMP_API_KEY", api_key)
+        os.environ["FMP_API_KEY"] = api_key
     if fmp_get is not None:
         return fmp_get(url, params=params, timeout=30)
     resp = requests.get(url, headers={"apikey": api_key}, params=params, timeout=30)
@@ -423,8 +428,12 @@ def get_current_stock_price(symbol, api_key):
         data = _fmp_json(FMP_STABLE_QUOTE_URL, {"symbol": symbol}, api_key)
     except Exception:
         data = None
-    if data and len(data) > 0 and data[0].get("price") is not None:
-        return data[0]["price"]
+    # Shape guard: FMP answers an invalid key with a 200-OK error OBJECT
+    # ({"Error Message": ...}), which is truthy and whose `[0]` raises. A
+    # degraded fetch must return None, never explode (codex gate P2).
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        if data[0].get("price") is not None:
+            return data[0]["price"]
 
     print(f"Error fetching current price for {symbol}: /stable/quote returned no data")
     return None
@@ -436,7 +445,7 @@ def get_dividend_yield(symbol, api_key):
         data = _fmp_json(FMP_STABLE_PROFILE_URL, {"symbol": symbol}, api_key)
     except Exception:
         data = None
-    if data and len(data) > 0:
+    if isinstance(data, list) and data and isinstance(data[0], dict):
         # /stable/profile renamed lastDiv -> lastDividend; accept either.
         last_div = data[0].get("lastDividend")
         if last_div is None:

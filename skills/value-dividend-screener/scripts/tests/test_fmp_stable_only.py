@@ -146,3 +146,98 @@ class TestAdapter:
         assert client._get("some-unmapped-endpoint") is None
         assert called == []  # never reached a transport
         assert "no /stable equivalent" in capsys.readouterr().err
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fmp_env(monkeypatch):
+    """The constructor now ASSIGNS FMP_API_KEY (see TestCallerKeyWins), so every
+    FMPClient construction would otherwise leak a key into the rest of the
+    session."""
+    monkeypatch.setenv("FMP_API_KEY", "ambient-house-key")
+    monkeypatch.setenv("FMP_FALLBACK_API_KEY", "ambient-fallback")
+
+
+class TestCallerKeyWins:
+    """`setdefault` could never fire: importing fmp_compat self-loads the house
+    credential at import, so FMP_API_KEY is always already set. A
+    caller-supplied credential must OVERRIDE the ambient one."""
+
+    def test_caller_key_overrides_a_preset_ambient_key(self):
+        FMPClient("caller-key")
+        assert fmp_compat.get_fmp_keys()[0] == "caller-key"
+
+    def test_empty_caller_key_leaves_the_ambient_key_alone(self):
+        FMPClient("")
+        assert fmp_compat.get_fmp_keys()[0] == "ambient-house-key"
+
+
+class TestStandaloneStableTransport:
+    """`_raw_stable_get` is the credential path of a standalone .skill install
+    (no repo-root fmp_compat importable). Pinning `fmp_get = None` keeps the
+    injection honest instead of silently reaching the network — the same shape
+    test_etf_scanner.py's `_direct_stable_transport` fixture uses."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+        monkeypatch.setattr(mod, "fmp_get", None, raising=False)
+        return FMPClient("caller-key")
+
+    @staticmethod
+    def _install(monkeypatch, client, response):
+        """Fake the INSTANCE session.get — fmp_compat patches Session.get at the
+        class level on import, so an instance attribute is what bypasses it."""
+        calls = []
+
+        def fake_get(url, params=None, timeout=None, **_kw):
+            calls.append((url, params))
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        monkeypatch.setattr(client.session, "get", fake_get)
+        return calls
+
+    def test_two_hundred_flat_list_returns_bars(self, monkeypatch, client):
+        bars = [
+            {"symbol": "AAPL", "date": "2026-05-19", "close": 100.0},
+            {"symbol": "AAPL", "date": "2026-05-18", "close": 99.0},
+        ]
+        calls = self._install(monkeypatch, client, _response(200, bars))
+
+        rows = client.get_historical_prices("AAPL", days=30)
+
+        assert [r["close"] for r in rows] == [100.0, 99.0]
+        assert len(calls) == 1
+        assert "/stable/historical-price-eod/full" in calls[0][0]
+        assert client._endpoint_failures[mod._FMP_HIST_ENDPOINTS[0]] == 0
+
+    def test_non_200_is_a_miss_and_records_an_endpoint_failure(self, monkeypatch, client):
+        self._install(monkeypatch, client, _response(402, {"Error Message": "quota"}))
+
+        assert client.get_historical_prices("AAPL", days=30) == []
+        assert client._endpoint_failures[mod._FMP_HIST_ENDPOINTS[0]] == 1
+
+    def test_undecodable_body_is_a_miss_and_records_an_endpoint_failure(
+        self, monkeypatch, client
+    ):
+        """MUTANT: let resp.json() raise out of _raw_stable_get -> a truncated
+        gateway body would crash the screener instead of degrading."""
+        bad = requests.Response()
+        bad.status_code = 200
+        bad._content = b"<html>not json</html>"
+        self._install(monkeypatch, client, bad)
+
+        assert client.get_historical_prices("AAPL", days=30) == []
+        assert client._endpoint_failures[mod._FMP_HIST_ENDPOINTS[0]] == 1
+
+    def test_transport_exception_is_a_miss(self, monkeypatch, client):
+        self._install(monkeypatch, client, requests.ConnectionError("boom"))
+
+        assert client.get_historical_prices("AAPL", days=30) == []
+        assert client._endpoint_failures[mod._FMP_HIST_ENDPOINTS[0]] == 1
+
+    def test_raw_path_carries_the_caller_key_as_the_apikey_header(self, client):
+        """No key failover on this path — the session header is the only
+        credential, and it must be the caller's."""
+        assert client.session.headers["apikey"] == "caller-key"

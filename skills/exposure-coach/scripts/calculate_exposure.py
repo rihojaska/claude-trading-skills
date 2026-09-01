@@ -175,7 +175,31 @@ def _absent_marker_path(path: Optional[Path]) -> Optional[Path]:
     return path.with_name(path.name[:-5] + ".absent.json")
 
 
-def _absent_marker_applies(path: Optional[Path], internal: Optional[datetime]) -> bool:
+def _extract_generated_at(data: Optional[dict]) -> Optional[datetime]:
+    """The pointer's own GENERATION time (top-level or `metadata`), newest wins.
+
+    Deliberately separate from `extract_input_date`, which ranks generated_at
+    LAST because a fresh stamp over old market data must not launder staleness.
+    That rule is about ageing the EVIDENCE. The absence-marker comparison asks a
+    different question — was this file written after the promoter declared the
+    cycle empty? — and only a generation time can answer it (codex gate P3).
+    """
+    if not isinstance(data, dict):
+        return None
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    stamps = [
+        _parse_timestamp(data.get("generated_at")),
+        _parse_timestamp(metadata.get("generated_at")),
+    ]
+    stamps = [s for s in stamps if s is not None]
+    return max(stamps) if stamps else None
+
+
+def _absent_marker_applies(
+    path: Optional[Path],
+    internal: Optional[datetime],
+    generated: Optional[datetime] = None,
+) -> bool:
     """True when a producer-written absence marker governs this pointer.
 
     The promoter (`scripts/promote_pulse_latest.py`, WPP-20260827-010) writes
@@ -184,9 +208,13 @@ def _absent_marker_applies(path: Optional[Path], internal: Optional[datetime]) -
     stale-but-real file rather than silently losing it. Marker presence
     therefore means exactly "the file beside me is not this cycle's".
 
-    A marker declared BEFORE the pointer's own internal date is about a file
-    that has since been replaced (a manual refresh that bypassed the promoter):
-    ignored, with a note. A marker that cannot be parsed is treated as
+    A marker declared BEFORE the pointer was WRITTEN is about a file that has
+    since been replaced (a manual refresh that bypassed the promoter): ignored,
+    with a note. The reference is the newest of the pointer's internal date and
+    its generation stamp — market-top's internal date is the OLDEST component
+    date, which structurally precedes the run, so comparing against that alone
+    made the escape unreachable for `top_risk`. mtime is NOT used: these
+    pointers are git-tracked and a checkout resets it. A marker that cannot be parsed is treated as
     present-but-unreadable and fails CLOSED — it is an explicit absence claim,
     and discarding it would restore the exact silent-staleness the marker
     exists to end (P5).
@@ -219,7 +247,9 @@ def _absent_marker_applies(path: Optional[Path], internal: Optional[datetime]) -
             file=sys.stderr,
         )
         return True
-    if internal is None or declared >= internal:
+    refs = [d for d in (internal, generated) if d is not None]
+    ref = max(refs) if refs else None
+    if ref is None or declared >= ref:
         return True
     print(
         f"Note: ignoring absence marker {marker_path} — it was declared before "
@@ -292,7 +322,7 @@ def classify_input_staleness(
             if mtime is not None:
                 age_days = max(age_days, (now - mtime).total_seconds() / 86400.0)
 
-    if _absent_marker_applies(path, internal):
+    if _absent_marker_applies(path, internal, _extract_generated_at(data)):
         return True, age_days, "absent_marker"
     if _is_non_decision_grade(key, data):
         return True, age_days, "non_decision_grade"

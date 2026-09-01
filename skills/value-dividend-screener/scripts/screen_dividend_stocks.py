@@ -216,7 +216,13 @@ class FMPClient:
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        os.environ.setdefault("FMP_API_KEY", api_key)
+        if api_key:
+            # Explicit assignment, not setdefault: importing fmp_compat
+            # self-loads the house credential file at import, so FMP_API_KEY is
+            # ALWAYS already set by the time this runs and a setdefault could
+            # never fire - the caller-supplied credential was silently
+            # discarded (codex gate P2).
+            os.environ["FMP_API_KEY"] = api_key
         self.session = requests.Session()
         self.session.headers.update({"apikey": self.api_key})
         self.rate_limit_reached = False

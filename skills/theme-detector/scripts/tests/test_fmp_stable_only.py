@@ -142,3 +142,26 @@ class TestAdapter:
         for _ in range(ETFScanner._ENDPOINT_FAILURE_THRESHOLD):
             scanner._fmp_request("quote", "AAPL")
         assert scanner._disabled_endpoints  # still trips with a single rung
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fmp_env(monkeypatch):
+    """The constructor now ASSIGNS FMP_API_KEY (see TestCallerKeyWins), so every
+    ETFScanner construction would otherwise leak a key into the rest of the
+    session."""
+    monkeypatch.setenv("FMP_API_KEY", "ambient-house-key")
+    monkeypatch.setenv("FMP_FALLBACK_API_KEY", "ambient-fallback")
+
+
+class TestCallerKeyWins:
+    """`setdefault` could never fire: importing fmp_compat self-loads the house
+    credential at import, so FMP_API_KEY is always already set. A
+    caller-supplied credential must OVERRIDE the ambient one."""
+
+    def test_caller_key_overrides_a_preset_ambient_key(self):
+        ETFScanner(fmp_api_key="caller-key", rate_limit_sec=0)
+        assert fmp_compat.get_fmp_keys()[0] == "caller-key"
+
+    def test_no_caller_key_leaves_the_ambient_key_alone(self):
+        ETFScanner(rate_limit_sec=0)
+        assert fmp_compat.get_fmp_keys()[0] == "ambient-house-key"

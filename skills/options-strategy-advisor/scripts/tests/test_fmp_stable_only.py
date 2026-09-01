@@ -112,3 +112,84 @@ class TestAdapter:
     def test_parsed_list_from_fmp_get_is_used(self, monkeypatch):
         monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: [{"price": 12.5}])
         assert black_scholes.get_current_stock_price("AAPL", "k") == 12.5
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fmp_env(monkeypatch):
+    """The adapter now ASSIGNS FMP_API_KEY (see TestCallerKeyWins), so every
+    construction would otherwise leak a key into the rest of the session."""
+    monkeypatch.setenv("FMP_API_KEY", "ambient-house-key")
+    monkeypatch.setenv("FMP_FALLBACK_API_KEY", "ambient-fallback")
+
+
+class TestErrorObjectDegradesInsteadOfRaising:
+    """FMP answers an invalid key with a 200-OK error OBJECT. It is truthy and
+    subscripting it raises — the adapter must degrade, not explode."""
+
+    ERROR_OBJECT = {"Error Message": "Invalid API KEY."}
+
+    def test_quote_error_object_is_a_miss(self, monkeypatch, capsys):
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: self.ERROR_OBJECT)
+        assert black_scholes.get_current_stock_price("AAPL", "k") is None
+        assert "returned no data" in capsys.readouterr().out
+
+    def test_profile_error_object_is_a_zero_yield(self, monkeypatch):
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: self.ERROR_OBJECT)
+        assert black_scholes.get_dividend_yield("AAPL", "k") == 0
+
+    def test_historical_error_object_is_a_miss(self, monkeypatch):
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: self.ERROR_OBJECT)
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None
+
+    def test_non_dict_list_element_is_a_miss(self, monkeypatch):
+        """MUTANT: guard only the dict case -> `["oops"][0].get` raises."""
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: ["oops"])
+        assert black_scholes.get_current_stock_price("AAPL", "k") is None
+        assert black_scholes.get_dividend_yield("AAPL", "k") == 0
+
+    def test_quote_row_without_a_price_is_a_miss(self, monkeypatch):
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: [{"symbol": "AAPL"}])
+        assert black_scholes.get_current_stock_price("AAPL", "k") is None
+
+
+class TestEmptyHistoricalIsAMiss:
+    """An empty payload carries no bars; HV over it would be fabricated."""
+
+    def test_empty_flat_list_is_a_miss(self, monkeypatch):
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: [])
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None
+
+    def test_empty_historical_dict_is_a_miss(self, monkeypatch):
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: {"historical": []})
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None
+
+    def test_empty_historical_stock_list_is_a_miss(self, monkeypatch):
+        monkeypatch.setattr(
+            black_scholes, "fmp_get", lambda *_a, **_k: {"historicalStockList": []}
+        )
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None
+
+
+class TestCallerKeyWins:
+    """`setdefault` could never fire: importing fmp_compat self-loads the house
+    credential at import, so FMP_API_KEY is always already set. A
+    caller-supplied credential must OVERRIDE the ambient one."""
+
+    def _keys_seen(self, monkeypatch):
+        seen = []
+        monkeypatch.setattr(
+            black_scholes,
+            "fmp_get",
+            lambda *_a, **_k: seen.append(fmp_compat.get_fmp_keys()) or None,
+        )
+        return seen
+
+    def test_caller_key_overrides_a_preset_ambient_key(self, monkeypatch):
+        seen = self._keys_seen(monkeypatch)
+        black_scholes.get_current_stock_price("AAPL", "caller-key")
+        assert seen and seen[0][0] == "caller-key"
+
+    def test_no_caller_key_leaves_the_ambient_key_alone(self, monkeypatch):
+        seen = self._keys_seen(monkeypatch)
+        black_scholes.get_current_stock_price("AAPL", "")
+        assert seen and seen[0][0] == "ambient-house-key"

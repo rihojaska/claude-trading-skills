@@ -8,6 +8,7 @@ from calculate_exposure import (
     CRITICAL_INPUTS,
     INPUT_MAX_AGE_DAYS,
     WEIGHTS,
+    _extract_generated_at,
     assess_input_staleness,
     calculate_composite_score,
     classify_input_staleness,
@@ -1374,6 +1375,115 @@ class TestNonDecisionGradeTopRisk:
         path = _pointer(tmp_path, "top_risk", data)
         (tmp_path / "top_risk.absent.json").write_text(_marker(0), encoding="utf-8")
         assert classify_input_staleness("top_risk", data, path)[2] == "absent_marker"
+
+
+class TestMarkerRefusalUsesGenerationTime:
+    """The "marker predates the pointer" escape must compare against when the
+    POINTER WAS WRITTEN, not against its data date.
+
+    market-top's `extract_input_date` returns the OLDEST component date, which
+    structurally precedes the run that produced the file — so comparing the
+    marker against that alone made the escape unreachable for `top_risk`: a
+    hand-refreshed pointer written AFTER the marker would still be typed absent
+    (codex gate P3)."""
+
+    def _market_top(self, component_days_ago, generated_days_ago):
+        return {
+            "composite": {"composite_score": 25},
+            "metadata": {
+                "generated_at": _iso_days_ago(generated_days_ago),
+                "data_freshness": {
+                    "breadth": {"date": _iso_days_ago(component_days_ago)},
+                },
+            },
+        }
+
+    def test_refreshed_market_top_pointer_ignores_an_older_marker(self, tmp_path, capsys):
+        """Component dates 3d old (inside the 8d bound), marker 2d old,
+        pointer regenerated 1d ago -> the marker is about a replaced file."""
+        data = self._market_top(component_days_ago=3, generated_days_ago=1)
+        path = _pointer(tmp_path, "top_risk", data)
+        (tmp_path / "top_risk.absent.json").write_text(_marker(2), encoding="utf-8")
+
+        is_stale, age, reason = classify_input_staleness("top_risk", data, path)
+
+        assert (is_stale, reason) == (False, None)
+        assert age == pytest.approx(3.0, abs=0.05)
+        assert "top_risk.absent.json" in capsys.readouterr().err
+
+    def test_marker_newer_than_the_generation_stamp_still_applies(self, tmp_path):
+        """The normal refused flow: pointer generated last week, marker
+        declared this cycle -> absence claim stands."""
+        data = self._market_top(component_days_ago=9, generated_days_ago=7)
+        path = _pointer(tmp_path, "top_risk", data)
+        (tmp_path / "top_risk.absent.json").write_text(_marker(0), encoding="utf-8")
+
+        assert classify_input_staleness("top_risk", data, path)[2] == "absent_marker"
+
+    def test_generation_stamp_does_not_freshen_the_age(self, tmp_path):
+        """MUTANT: reuse the generation time as the AGE input -> a regenerated
+        report over stale market data would ride free. Age stays data-dated."""
+        data = self._market_top(component_days_ago=20, generated_days_ago=0)
+        path = _pointer(tmp_path, "top_risk", data)
+
+        is_stale, age, reason = classify_input_staleness("top_risk", data, path)
+
+        assert (is_stale, reason) == (True, "age")
+        assert age == pytest.approx(20.0, abs=0.05)
+
+    def test_extract_generated_at_reads_both_levels_and_takes_the_newest(self):
+        assert _extract_generated_at(None) is None
+        assert _extract_generated_at({"ftd_score": 1}) is None
+        top = _extract_generated_at({"generated_at": _iso_days_ago(2)})
+        assert top is not None
+        newest = _extract_generated_at(
+            {
+                "generated_at": _iso_days_ago(5),
+                "metadata": {"generated_at": _iso_days_ago(1)},
+            }
+        )
+        assert (datetime.now(timezone.utc) - newest).total_seconds() / 86400.0 == pytest.approx(
+            1.0, abs=0.05
+        )
+
+    def test_mtime_is_not_the_reference(self, tmp_path, capsys):
+        """MUTANT: use path.stat().st_mtime as the reference -> a fresh checkout
+        (mtime = now) would silently discard every live absence claim."""
+        data = self._market_top(component_days_ago=3, generated_days_ago=3)
+        path = _pointer(tmp_path, "top_risk", data)  # just written: mtime == now
+        (tmp_path / "top_risk.absent.json").write_text(_marker(0), encoding="utf-8")
+
+        assert classify_input_staleness("top_risk", data, path)[2] == "absent_marker"
+
+
+class TestNonDecisionGradePrecedenceOverDateReasons:
+    """`non_decision_grade` outranks both date-derived reasons — the producer
+    saying WHY the evidence is unusable beats the arithmetic."""
+
+    def test_non_decision_grade_outranks_undated(self, tmp_path):
+        data = {
+            "composite": {"composite_score": 25},
+            "metadata": {"data_coverage": {"decision_grade": False}},
+        }
+        path = _pointer(tmp_path, "top_risk", data)
+        assert classify_input_staleness("top_risk", data, path) == (
+            True,
+            None,
+            "non_decision_grade",
+        )
+
+    def test_non_decision_grade_outranks_future_dated(self, tmp_path):
+        data = {
+            "composite": {"composite_score": 25},
+            "metadata": {
+                "generated_at": _iso_days_ago(-10),
+                "data_coverage": {"decision_grade": False},
+            },
+        }
+        path = _pointer(tmp_path, "top_risk", data)
+        is_stale, age, reason = classify_input_staleness("top_risk", data, path)
+        assert (is_stale, reason) == (True, "non_decision_grade")
+        assert age == pytest.approx(-10.0, abs=0.05)
 
 
 class TestAssessInputStalenessWrapper:

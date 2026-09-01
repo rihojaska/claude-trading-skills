@@ -151,7 +151,12 @@ class ETFScanner:
         if fmp_api_key:
             # fmp_get() reads its keys from the environment; honour a
             # caller-supplied key without changing that signature.
-            os.environ.setdefault("FMP_API_KEY", fmp_api_key)
+            # Explicit assignment, not setdefault: importing fmp_compat
+            # self-loads the house credential file at import, so FMP_API_KEY is
+            # ALWAYS already set by the time this runs and a setdefault could
+            # never fire - the caller-supplied credential was silently
+            # discarded (codex gate P2).
+            os.environ["FMP_API_KEY"] = fmp_api_key
         self._rate_limit_sec = rate_limit_sec
         self._last_request_time = 0.0
         self._fmp_quote_cache: dict[str, dict] = {}  # normalized_symbol -> quote dict
