@@ -2,7 +2,7 @@
 
 The retired v3 endpoints 403 for keys issued after 2025-08-31. FMPClient._get
 now routes the legacy v3 path-style endpoint strings to their /stable
-query-style equivalents (with a v3 fallback) and normalizes the responses back
+query-style equivalents (no v3 rung — WPP-20260831-004) and normalizes the responses back
 to the v3 shapes callers expect:
 
 - historical-price-full/stock_dividend/{sym} -> dividends?symbol= (flat list
@@ -123,17 +123,27 @@ class TestGetRouting:
         result = client.get_historical_prices("AAPL", days=30)
         assert result == bars  # flat list returned directly, close field intact
 
-    def test_v3_fallback_when_stable_fails(self):
+    def test_no_v3_rung_stable_miss_is_a_single_attempt(self):
+        """A /stable miss is NOT retried on v3 (WPP-20260831-004)."""
+
         def router(url, params=None, timeout=None):
-            if "/stable/" in url:
-                return _resp(403, {})
-            return _resp(200, [{"symbol": "AAPL", "sector": "Tech"}])
+            return _resp(403, {})
 
         client, session = _client(router)
-        profile = client.get_company_profile("AAPL")
-        assert profile["sector"] == "Tech"
+        assert client.get_company_profile("AAPL") is None
         urls = [c[0][0] for c in session.get.call_args_list]
-        assert any(u.endswith("/api/v3/profile/AAPL") for u in urls)
+        assert urls == ["https://financialmodelingprep.com/stable/profile"]
+        assert not any("/api/v3/" in u for u in urls)
+
+    def test_no_v3_url_is_constructed_anywhere(self):
+        client, session = _client(lambda *a, **k: _resp(200, [{"symbol": "AAPL"}]))
+        client.get_company_profile("AAPL")
+        client.get_key_metrics("AAPL", limit=1)
+        client.get_cash_flow("AAPL", limit=1)
+        client.get_historical_prices("AAPL", days=5)
+        urls = [c[0][0] for c in session.get.call_args_list]
+        assert urls and all("/stable/" in u for u in urls)
+        assert not any("/api/v3/" in u for u in urls)
 
 
 class TestDividendGrowthTTM:

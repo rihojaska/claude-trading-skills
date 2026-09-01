@@ -38,7 +38,15 @@ SKILL_ROOT = Path(__file__).resolve().parents[3]
 if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
-from fmp_compat import fmp_get
+try:
+    from fmp_compat import fmp_get
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
 
 
 def _yf_dividend_history(symbol: str) -> Optional[dict]:
@@ -180,17 +188,20 @@ class FINVIZClient:
             return set()
 
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+# --- FMP historical endpoint: /stable only. ---
+# FMP retired v3 for keys issued after 2025-08-31, and a v3 URL requested
+# through fmp_compat is rewritten straight back to the equivalent /stable
+# endpoint (`_V3_TO_STABLE` in the repo-root fmp_compat.py) — so the old "v3
+# fallback" rung was never a distinct upstream, only a second rate-limited
+# query of the SAME endpoint (WPP-20260831-004).
 _FMP_HIST_ENDPOINTS = [
-    ("https://financialmodelingprep.com/stable/historical-price-eod/full", True),
-    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
+    "https://financialmodelingprep.com/stable/historical-price-eod/full",
 ]
 
 
 class FMPClient:
     """Financial Modeling Prep API client with rate limiting."""
 
-    BASE_URL = "https://financialmodelingprep.com/api/v3"
     STABLE_URL = "https://financialmodelingprep.com/stable"
 
     _ENDPOINT_FAILURE_THRESHOLD = 3
@@ -216,11 +227,28 @@ class FMPClient:
         self._endpoint_failures: dict[str, int] = {}
         self._disabled_endpoints: set[str] = set()
 
+    def _raw_stable_get(self, url: str, params: dict) -> Optional[dict]:
+        """Direct /stable GET — used only when fmp_compat is not importable.
+
+        No key failover (that lives in fmp_get); the constructor's apikey
+        session header is the only credential on this path.
+        """
+        try:
+            resp = self.session.get(url, params=params, timeout=30)
+        except Exception:
+            return None
+        if getattr(resp, "status_code", None) != 200:
+            return None
+        try:
+            return resp.json()
+        except Exception:
+            return None
+
     def _request(self, url: str, params: dict, quiet: bool = False) -> Optional[dict]:
         """Single rate-limited GET. Returns parsed JSON, or None on failure.
 
-        Non-final endpoints pass quiet=True to suppress the expected 403 a new
-        key gets on the v3 fallback.
+        `quiet=True` suppresses the WARNING line for callers that handle a
+        miss themselves (the circuit-breakered historical fetch).
         """
         if self.rate_limit_reached:
             return None
@@ -228,7 +256,10 @@ class FMPClient:
         if params is None:
             params = {}
 
-        result = fmp_get(url, params=params, timeout=30)
+        if fmp_get is not None:
+            result = fmp_get(url, params=params, timeout=30)
+        else:
+            result = self._raw_stable_get(url, params)
         time.sleep(0.3)  # Rate limiting: 0.3s between requests
         if result is None and not quiet:
             print(f"WARNING: FMP request failed or quota-limited: {url}", file=sys.stderr)
@@ -277,27 +308,31 @@ class FMPClient:
         return data
 
     def _get(self, endpoint: str, params: Optional[dict] = None) -> Optional[dict]:
-        """GET an FMP endpoint, preferring /stable with a v3 path-style fallback.
+        """GET an FMP /stable endpoint from a legacy v3 path-style `endpoint`.
 
-        Callers still pass the legacy v3 path-style `endpoint` strings (e.g.
+        Callers still pass the legacy v3 path-style strings (e.g.
         "income-statement/AAPL"); this routes them to the /stable query-style
-        equivalents and normalizes the response back to the v3 shape. Keys
-        issued after 2025-08-31 only work on /stable; legacy keys fall back to v3.
+        equivalent and normalizes the response back to the v3 shape callers
+        expect. There is no v3 rung: FMP retired v3 for keys issued after
+        2025-08-31, and fmp_compat rewrites a v3 URL straight back to the same
+        /stable endpoint, so the old fallback only spent a second rate-limited
+        call on the SAME upstream (WPP-20260831-004).
         """
         if self.rate_limit_reached:
             return None
         params = params or {}
-        attempts = []
         spec = self._stable_spec(endpoint, params)
-        if spec:
-            attempts.append(spec)  # /stable first
-        attempts.append((f"{self.BASE_URL}/{endpoint}", dict(params)))  # v3 fallback
-        for i, (url, req_params) in enumerate(attempts):
-            quiet = i < len(attempts) - 1
-            data = self._request(url, req_params, quiet=quiet)
-            if data is not None:
-                return self._normalize(endpoint, data)
-        return None
+        if spec is None:
+            print(
+                f"WARNING: no /stable equivalent for FMP endpoint {endpoint!r}",
+                file=sys.stderr,
+            )
+            return None
+        url, req_params = spec
+        data = self._request(url, req_params)
+        if data is None:
+            return None
+        return self._normalize(endpoint, data)
 
     def screen_stocks(self, min_market_cap: int = 2000000000, exchange: str = None) -> list[dict]:
         """Screen stocks by market cap and exchange."""
@@ -309,49 +344,42 @@ class FMPClient:
         return result if result else []
 
     def get_historical_prices(self, symbol: str, days: int = 30) -> Optional[list[dict]]:
-        """Get historical daily prices, most-recent-first (/stable, v3 fallback).
+        """Get historical daily prices, most-recent-first (/stable only).
 
         /stable/historical-price-eod/full returns a flat list of OHLCV bars and
-        is bounded with from/to; the v3 fallback returns {"historical": [...]}.
+        is bounded with from/to. Routed through `_request`, so on the fmp_compat
+        path the payload arrives already reshaped to the legacy
+        {"symbol", "historical"} dict; both shapes are accepted.
         """
-        for base_url, is_stable in _FMP_HIST_ENDPOINTS:
+        for base_url in _FMP_HIST_ENDPOINTS:
             if base_url in self._disabled_endpoints:
                 continue
-            if is_stable:
-                url = base_url
-                today = datetime.now().date()
-                params = {
-                    "symbol": symbol,
-                    # ~days trading days needs ~2x calendar days; +10 for slack.
-                    "from": (today - timedelta(days=days * 2 + 10)).isoformat(),
-                    "to": today.isoformat(),
-                }
-            else:
-                url = f"{base_url}/{symbol}"
-                params = {"timeseries": days}
+            today = datetime.now().date()
+            params = {
+                "symbol": symbol,
+                # ~days trading days needs ~2x calendar days; +10 for slack.
+                "from": (today - timedelta(days=days * 2 + 10)).isoformat(),
+                "to": today.isoformat(),
+            }
             try:
-                response = self.session.get(url, params=params, timeout=30)
-                time.sleep(0.3)
-                if response.status_code != 200:
-                    self._record_endpoint_failure(base_url)
-                    continue
-                data = response.json()
-                # /stable: flat list of bars (most-recent-first).
+                data = self._request(base_url, params, quiet=True)
+                # Flat list of bars (most-recent-first).
                 if isinstance(data, list):
                     if data:
                         self._endpoint_failures[base_url] = 0
                         return data[:days]
                     self._record_endpoint_failure(base_url)
                     continue
-                # v3: {"symbol": ..., "historical": [...]}.
-                if isinstance(data, dict) and "historical" in data:
+                # fmp_compat-normalised shape: {"symbol": ..., "historical": [...]}.
+                # An EMPTY `historical` is a miss, not a success.
+                if isinstance(data, dict) and data.get("historical"):
                     self._endpoint_failures[base_url] = 0
-                    return data["historical"]
-                if isinstance(data, dict) and "historicalStockList" in data:
+                    return data["historical"][:days]
+                if isinstance(data, dict) and data.get("historicalStockList"):
                     for entry in data["historicalStockList"]:
                         if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
                             self._endpoint_failures[base_url] = 0
-                            return entry.get("historical", [])
+                            return entry.get("historical", [])[:days]
                 self._record_endpoint_failure(base_url)
             except Exception:
                 self._record_endpoint_failure(base_url)

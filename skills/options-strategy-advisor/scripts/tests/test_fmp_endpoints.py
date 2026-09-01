@@ -1,19 +1,35 @@
-"""FMP /stable migration: live quote + dividend-yield helpers.
+"""FMP /stable-only helpers: live quote, dividend yield, HV price history.
 
-get_current_stock_price and get_dividend_yield used v3 path-style endpoints
-(/quote/SYM, /profile/SYM) that 403 for keys issued after 2025-08-31. They now
-call the /stable query-style endpoints first, with a v3 fallback. /stable also
-renamed the dividend field lastDiv -> lastDividend, which get_dividend_yield
-must read or it silently returns 0.
+These used to try `/stable/...` and then a second `/api/v3/...` rung. fmp_compat
+rewrites a v3 URL straight back to the equivalent /stable endpoint, so that rung
+was never a distinct upstream — only a second rate-limited call on the SAME one
+(WPP-20260831-004). The v3 entries are deleted.
+
+This file pins the DIRECT-requests fallback used by a standalone .skill install
+(fmp_compat not importable). The production fmp_compat path is pinned at the
+transport seam in test_fmp_stable_only.py.
 """
 
 import os
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from black_scholes import get_current_stock_price, get_dividend_yield
+import black_scholes  # noqa: E402
+from black_scholes import (  # noqa: E402
+    fetch_historical_prices_for_hv,
+    get_current_stock_price,
+    get_dividend_yield,
+)
+
+
+@pytest.fixture(autouse=True)
+def _direct_stable_transport(monkeypatch):
+    """Force the no-fmp_compat fallback so `black_scholes.requests` is the seam."""
+    monkeypatch.setattr(black_scholes, "fmp_get", None, raising=False)
 
 
 def _resp(status_code, json_payload):
@@ -25,26 +41,20 @@ def _resp(status_code, json_payload):
 
 class TestCurrentStockPrice:
     @patch("black_scholes.requests")
-    def test_uses_stable_quote_first(self, mock_requests):
+    def test_uses_stable_quote(self, mock_requests):
         mock_requests.get.return_value = _resp(200, [{"symbol": "AAPL", "price": 150.0}])
-        price = get_current_stock_price("AAPL", "key")
-        assert price == 150.0
+        assert get_current_stock_price("AAPL", "key") == 150.0
         call = mock_requests.get.call_args
         assert call[0][0].endswith("/stable/quote")
         assert call[1]["params"] == {"symbol": "AAPL"}
 
     @patch("black_scholes.requests")
-    def test_falls_back_to_v3(self, mock_requests):
-        def fake_get(url, headers=None, params=None, timeout=None):
-            if url.endswith("/stable/quote"):
-                return _resp(403, {})  # legacy/stable failure -> fallback
-            return _resp(200, [{"symbol": "AAPL", "price": 150.0}])
-
-        mock_requests.get.side_effect = fake_get
-        price = get_current_stock_price("AAPL", "key")
-        assert price == 150.0
+    def test_no_v3_rung_on_failure(self, mock_requests):
+        mock_requests.get.return_value = _resp(403, {})
+        assert get_current_stock_price("AAPL", "key") is None
+        assert mock_requests.get.call_count == 1
         urls = [c[0][0] for c in mock_requests.get.call_args_list]
-        assert any(u.endswith("/api/v3/quote/AAPL") for u in urls)
+        assert not any("/api/v3/" in u for u in urls)
 
 
 class TestDividendYield:
@@ -60,16 +70,53 @@ class TestDividendYield:
         assert call[1]["params"] == {"symbol": "AAPL"}
 
     @patch("black_scholes.requests")
-    def test_v3_lastDiv_still_supported(self, mock_requests):
-        def fake_get(url, headers=None, params=None, timeout=None):
-            if url.endswith("/stable/profile"):
-                return _resp(403, {})
-            return _resp(200, [{"symbol": "AAPL", "lastDiv": 4.0, "price": 100.0}])
-
-        mock_requests.get.side_effect = fake_get
+    def test_legacy_lastDiv_field_still_read(self, mock_requests):
+        # Older payloads (and cached fixtures) still carry lastDiv.
+        mock_requests.get.return_value = _resp(
+            200, [{"symbol": "AAPL", "lastDiv": 4.0, "price": 100.0}]
+        )
         assert get_dividend_yield("AAPL", "key") == 0.04
 
     @patch("black_scholes.requests")
     def test_zero_when_no_data(self, mock_requests):
         mock_requests.get.return_value = _resp(200, [])
         assert get_dividend_yield("AAPL", "key") == 0
+
+    @patch("black_scholes.requests")
+    def test_no_v3_rung_on_failure(self, mock_requests):
+        mock_requests.get.return_value = _resp(403, {})
+        assert get_dividend_yield("AAPL", "key") == 0
+        assert mock_requests.get.call_count == 1
+
+
+class TestHistoricalPricesForHV:
+    @patch("black_scholes.requests")
+    def test_stable_flat_list_is_parsed(self, mock_requests):
+        """The /stable EOD endpoint returns a FLAT list.
+
+        The pre-migration dict-only parsing dropped it silently and fell
+        through to the v3 rung; the direct path now handles both shapes.
+        """
+        mock_requests.get.return_value = _resp(
+            200,
+            [
+                {"date": "2026-05-19", "close": 101.0},
+                {"date": "2026-05-18", "close": 100.0},
+            ],
+        )
+        # Returned oldest-first (reversed from FMP's most-recent-first order).
+        assert fetch_historical_prices_for_hv("AAPL", "key", days=90) == [100.0, 101.0]
+        assert mock_requests.get.call_args[0][0].endswith("/stable/historical-price-eod/full")
+
+    @patch("black_scholes.requests")
+    def test_legacy_dict_shape_is_parsed(self, mock_requests):
+        mock_requests.get.return_value = _resp(
+            200, {"symbol": "AAPL", "historical": [{"date": "2026-05-19", "adjClose": 42.0}]}
+        )
+        assert fetch_historical_prices_for_hv("AAPL", "key", days=90) == [42.0]
+
+    @patch("black_scholes.requests")
+    def test_no_v3_rung_on_failure(self, mock_requests):
+        mock_requests.get.return_value = _resp(403, {})
+        assert fetch_historical_prices_for_hv("AAPL", "key", days=90) is None
+        assert mock_requests.get.call_count == 1

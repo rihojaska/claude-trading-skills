@@ -9,9 +9,11 @@ PE ratio, volume ratios.
 FMP API key is optional; without it, yfinance is used exclusively.
 """
 
+import os
 import sys
 import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -35,9 +37,23 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
 
 # ---------------------------------------------------------------------------
-# FMP endpoint definitions (R2-1: callable URL builders for stable/v3)
+# FMP endpoint definitions (callable URL builders; /stable only)
 # ---------------------------------------------------------------------------
 
 
@@ -45,11 +61,6 @@ def _stable_quote_url(base: str, symbols_str: str, params: dict) -> tuple[str, d
     """stable/quote?symbol=A,B"""
     params["symbol"] = symbols_str
     return base, params
-
-
-def _v3_quote_url(base: str, symbols_str: str, params: dict) -> tuple[str, dict]:
-    """api/v3/quote/A,B"""
-    return f"{base}/{symbols_str}", params
 
 
 def _stable_hist_url(base: str, symbols_str: str, params: dict) -> tuple[str, dict]:
@@ -63,11 +74,6 @@ def _stable_hist_url(base: str, symbols_str: str, params: dict) -> tuple[str, di
         params["from"] = (today - timedelta(days=int(days) * 2 + 10)).isoformat()
         params["to"] = today.isoformat()
     return base, params
-
-
-def _v3_hist_url(base: str, symbols_str: str, params: dict) -> tuple[str, dict]:
-    """api/v3/historical-price-full/A,B?..."""
-    return f"{base}/{symbols_str}", params
 
 
 def _normalize_eod_flat_list(data: Any, symbols_str: str) -> Any:
@@ -91,16 +97,38 @@ def _normalize_eod_flat_list(data: Any, symbols_str: str) -> Any:
     return {"symbol": symbols_str, "historical": rows}
 
 
+# /stable only. FMP retired v3 for keys issued after 2025-08-31, and a v3 URL
+# requested through fmp_compat is rewritten straight back to the equivalent
+# /stable endpoint (see `_V3_TO_STABLE` in the repo-root fmp_compat.py) — so a
+# second "v3 rung" here was never a distinct upstream, only a second
+# rate-limited query of the SAME endpoint (WPP-20260831-004). The real
+# cross-provider fallback is yfinance, wired into the callers below.
 _FMP_ENDPOINTS = {
     "quote": [
         ("https://financialmodelingprep.com/stable/quote", _stable_quote_url),
-        ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
         ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
 }
+
+
+def _fmp_fetch(url: str, params: dict, api_key: str) -> Any:
+    """One upstream GET returning parsed JSON (or None).
+
+    Prefers `fmp_compat.fmp_get` (v3→stable rewriting + dual-key failover on
+    rate-limit signals). Falls back to a direct /stable request when the
+    repo-root shim is not importable (standalone .skill install), which has no
+    key failover.
+    """
+    if fmp_get is not None:
+        return fmp_get(url, params=params, timeout=15)
+    if not HAS_REQUESTS:
+        return None
+    resp = _requests_lib.get(url, params=params, headers={"apikey": api_key}, timeout=15)
+    if resp.status_code != 200:
+        return None
+    return resp.json()
 
 
 class ETFScanner:
@@ -120,6 +148,10 @@ class ETFScanner:
     def __init__(self, fmp_api_key: Optional[str] = None, rate_limit_sec: float = 0.3):
         self._cache: dict[str, pd.DataFrame] = {}
         self._fmp_api_key = fmp_api_key
+        if fmp_api_key:
+            # fmp_get() reads its keys from the environment; honour a
+            # caller-supplied key without changing that signature.
+            os.environ.setdefault("FMP_API_KEY", fmp_api_key)
         self._rate_limit_sec = rate_limit_sec
         self._last_request_time = 0.0
         self._fmp_quote_cache: dict[str, dict] = {}  # normalized_symbol -> quote dict
@@ -168,7 +200,7 @@ class ETFScanner:
     def _fmp_request(
         self, endpoint_key: str, symbols_str: str, extra_params: Optional[dict] = None
     ) -> Optional[Any]:
-        """Try each endpoint (stable -> v3) with circuit breaker.
+        """Query the /stable endpoint for `endpoint_key` behind a circuit breaker.
 
         Endpoints that fail consecutively are disabled to avoid wasting
         API calls and triggering rate limits from the provider.
@@ -198,19 +230,21 @@ class ETFScanner:
             self._fmp_rate_limit()
             self._stats[ctx]["fmp_calls"] += 1
             try:
-                resp = _requests_lib.get(
-                    url, params=final_params, headers={"apikey": self._fmp_api_key}, timeout=15
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if endpoint_key == "historical":
-                        # /stable returns a flat OHLCV list; reshape to the v3
-                        # {"symbol", "historical"} dict the parser expects.
-                        data = _normalize_eod_flat_list(data, symbols_str)
-                    if data:
-                        # Reset failure count on success
-                        self._endpoint_failures[base_url] = 0
-                        return data
+                data = _fmp_fetch(url, final_params, self._fmp_api_key)
+                if endpoint_key == "historical":
+                    # /stable returns a flat OHLCV list; reshape to the v3
+                    # {"symbol", "historical"} dict the parser expects. fmp_get
+                    # already normalises this shape, so the call is a no-op on
+                    # that path — but an EMPTY payload arrives as a truthy
+                    # {"symbol": ..., "historical": []} dict, which must count
+                    # as a miss, not a success.
+                    data = _normalize_eod_flat_list(data, symbols_str)
+                    if isinstance(data, dict) and "historical" in data and not data["historical"]:
+                        data = None
+                if data:
+                    # Reset failure count on success
+                    self._endpoint_failures[base_url] = 0
+                    return data
             except Exception:
                 pass
 

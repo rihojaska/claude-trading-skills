@@ -29,9 +29,56 @@ Author: Claude Trading Skills
 Version: 1.0
 """
 
+import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import requests
 from scipy.stats import norm
+
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
+
+# --- FMP endpoints: /stable only. ---
+# FMP retired v3 for keys issued after 2025-08-31, and a v3 URL requested
+# through fmp_compat is rewritten straight back to the equivalent /stable
+# endpoint (`_V3_TO_STABLE` in the repo-root fmp_compat.py) — so the old "v3
+# fallback" rung was never a distinct upstream, only a second rate-limited
+# query of the SAME endpoint (WPP-20260831-004).
+FMP_STABLE_QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
+FMP_STABLE_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
+FMP_STABLE_HIST_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
+
+
+def _fmp_json(url, params, api_key):
+    """One FMP GET returning parsed JSON, or None.
+
+    Prefers `fmp_compat.fmp_get` (dual-key failover on rate-limit signals).
+    A caller-supplied `api_key` is exported into the environment because
+    fmp_get reads its keys from there; the direct fallback keeps sending it as
+    an `apikey` header.
+    """
+    if api_key:
+        os.environ.setdefault("FMP_API_KEY", api_key)
+    if fmp_get is not None:
+        return fmp_get(url, params=params, timeout=30)
+    resp = requests.get(url, headers={"apikey": api_key}, params=params, timeout=30)
+    if resp.status_code != 200:
+        return None
+    return resp.json()
 
 
 class OptionPricer:
@@ -336,41 +383,32 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
     list
         List of adjusted close prices
     """
-    # Try stable endpoint first, fall back to v3
-    endpoints = [
-        ("https://financialmodelingprep.com/stable/historical-price-eod/full", True),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
-    ]
-    for base_url, is_stable in endpoints:
-        try:
-            if is_stable:
-                url = base_url
-                resp = requests.get(
-                    url, headers={"apikey": api_key}, params={"symbol": symbol}, timeout=30
-                )
-            else:
-                url = f"{base_url}/{symbol}"
-                resp = requests.get(url, headers={"apikey": api_key}, timeout=30)
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            historical = None
-            if isinstance(data, dict) and "historical" in data:
-                historical = data["historical"]
-            elif isinstance(data, dict) and "historicalStockList" in data:
-                for entry in data["historicalStockList"]:
-                    if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
-                        historical = entry.get("historical", [])
-                        break
-            if historical:
-                historical = historical[:days]
-                historical = historical[::-1]  # Reverse to chronological order
-                # stable shape compat: EOD endpoint exposes `close`, not `adjClose`
-                return [item.get("adjClose") or item["close"] for item in historical]
-        except Exception:  # nosec B112 - intentional fallback to next FMP endpoint
-            continue
+    try:
+        data = _fmp_json(FMP_STABLE_HIST_URL, {"symbol": symbol}, api_key)
+    except Exception:
+        data = None
 
-    print(f"Error fetching prices for {symbol}: all endpoints failed")
+    historical = None
+    # /stable returns a flat OHLCV list; fmp_compat reshapes it to the legacy
+    # {"symbol", "historical"} dict. Accept both — the direct fallback path
+    # sees the flat list, which the pre-existing dict-only parsing dropped.
+    if isinstance(data, list):
+        historical = [r for r in data if isinstance(r, dict)]
+    elif isinstance(data, dict) and "historical" in data:
+        historical = data["historical"]
+    elif isinstance(data, dict) and "historicalStockList" in data:
+        for entry in data["historicalStockList"]:
+            if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
+                historical = entry.get("historical", [])
+                break
+
+    if historical:
+        historical = historical[:days]
+        historical = historical[::-1]  # Reverse to chronological order
+        # stable shape compat: EOD endpoint exposes `close`, not `adjClose`
+        return [item.get("adjClose") or item["close"] for item in historical]
+
+    print(f"Error fetching prices for {symbol}: /stable historical returned no data")
     return None
 
 
@@ -380,64 +418,32 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
 
 
 def get_current_stock_price(symbol, api_key):
-    """Fetch current stock price from FMP API (stable, with v3 fallback)."""
-    # stable: /quote?symbol=SYM ; v3 fallback (legacy keys): /quote/SYM
-    endpoints = [
-        ("https://financialmodelingprep.com/stable/quote", True),
-        ("https://financialmodelingprep.com/api/v3/quote", False),
-    ]
-    for base_url, is_stable in endpoints:
-        try:
-            if is_stable:
-                response = requests.get(
-                    base_url, headers={"apikey": api_key}, params={"symbol": symbol}, timeout=30
-                )
-            else:
-                response = requests.get(
-                    f"{base_url}/{symbol}", headers={"apikey": api_key}, timeout=30
-                )
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            if data and len(data) > 0 and data[0].get("price") is not None:
-                return data[0]["price"]
-        except Exception:  # nosec B112 - intentional fallback to next FMP endpoint
-            continue
+    """Fetch current stock price from FMP /stable/quote."""
+    try:
+        data = _fmp_json(FMP_STABLE_QUOTE_URL, {"symbol": symbol}, api_key)
+    except Exception:
+        data = None
+    if data and len(data) > 0 and data[0].get("price") is not None:
+        return data[0]["price"]
 
-    print(f"Error fetching current price for {symbol}: all endpoints failed")
+    print(f"Error fetching current price for {symbol}: /stable/quote returned no data")
     return None
 
 
 def get_dividend_yield(symbol, api_key):
-    """Fetch dividend yield from FMP API (stable, with v3 fallback)."""
-    # stable: /profile?symbol=SYM ; v3 fallback (legacy keys): /profile/SYM
-    endpoints = [
-        ("https://financialmodelingprep.com/stable/profile", True),
-        ("https://financialmodelingprep.com/api/v3/profile", False),
-    ]
-    for base_url, is_stable in endpoints:
-        try:
-            if is_stable:
-                response = requests.get(
-                    base_url, headers={"apikey": api_key}, params={"symbol": symbol}, timeout=30
-                )
-            else:
-                response = requests.get(
-                    f"{base_url}/{symbol}", headers={"apikey": api_key}, timeout=30
-                )
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            if data and len(data) > 0:
-                # /stable/profile renamed lastDiv -> lastDividend; accept either.
-                last_div = data[0].get("lastDividend")
-                if last_div is None:
-                    last_div = data[0].get("lastDiv", 0)
-                last_div = last_div or 0
-                price = data[0].get("price", 1) or 1
-                return (last_div / price) if price > 0 else 0
-        except Exception:  # nosec B112 - intentional fallback to next FMP endpoint
-            continue
+    """Fetch dividend yield from FMP /stable/profile."""
+    try:
+        data = _fmp_json(FMP_STABLE_PROFILE_URL, {"symbol": symbol}, api_key)
+    except Exception:
+        data = None
+    if data and len(data) > 0:
+        # /stable/profile renamed lastDiv -> lastDividend; accept either.
+        last_div = data[0].get("lastDividend")
+        if last_div is None:
+            last_div = data[0].get("lastDiv", 0)
+        last_div = last_div or 0
+        price = data[0].get("price", 1) or 1
+        return (last_div / price) if price > 0 else 0
 
     return 0
 

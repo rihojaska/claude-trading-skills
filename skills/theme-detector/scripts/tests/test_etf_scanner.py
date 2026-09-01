@@ -6,9 +6,25 @@ per-symbol retry, symbol-level fallback, and backend stats.
 
 from unittest.mock import MagicMock, patch
 
+import etf_scanner
 import numpy as np
 import pandas as pd
+import pytest
 from etf_scanner import ETFScanner
+
+
+@pytest.fixture(autouse=True)
+def _direct_stable_transport(monkeypatch):
+    """Exercise the standalone (no-fmp_compat) transport throughout this file.
+
+    etf_scanner prefers `fmp_compat.fmp_get`; the tests below inject canned
+    responses at `_requests_lib`, which is the direct /stable path used when
+    the repo-root shim is not importable. Pinning `fmp_get = None` keeps that
+    injection honest instead of silently reaching the network. The fmp_get
+    path is covered end-to-end at the real transport seam in
+    test_fmp_stable_only.py.
+    """
+    monkeypatch.setattr(etf_scanner, "fmp_get", None, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +130,7 @@ class TestNormalizeSymbol:
 # TestFMPEndpointFallback
 # ---------------------------------------------------------------------------
 class TestFMPEndpointFallback:
-    """Tests for _fmp_request stable -> v3 fallback."""
+    """Tests for _fmp_request: one /stable rung, circuit-broken."""
 
     def _make_scanner(self):
         return ETFScanner(fmp_api_key="test_key", rate_limit_sec=0)
@@ -139,32 +155,34 @@ class TestFMPEndpointFallback:
         assert called_params["symbol"] == "AAPL,MSFT"
 
     @patch("etf_scanner._requests_lib")
-    def test_stable_fails_falls_back_to_v3_path_format(self, mock_requests):
-        """When stable fails, v3 endpoint uses /SYMBOLS path format."""
-        scanner = self._make_scanner()
+    def test_no_v3_rung_stable_miss_is_a_single_attempt(self, mock_requests):
+        """A /stable miss is NOT retried on v3 (WPP-20260831-004).
 
-        # First call (stable) fails
+        The old second rung was rewritten back to the same /stable endpoint by
+        fmp_compat, so it only spent a second rate-limited call.
+        """
+        scanner = self._make_scanner()
         fail_resp = MagicMock()
         fail_resp.status_code = 500
-        # Second call (v3) succeeds
-        ok_resp = MagicMock()
-        ok_resp.status_code = 200
-        ok_resp.json.return_value = [{"symbol": "AAPL"}]
-        mock_requests.get.side_effect = [fail_resp, ok_resp]
+        mock_requests.get.return_value = fail_resp
 
         result = scanner._fmp_request("quote", "AAPL,MSFT")
-        assert result is not None
+        assert result is None
+        assert mock_requests.get.call_count == 1
+        called_url = mock_requests.get.call_args[0][0]
+        assert "/stable/quote" in called_url
+        assert "/api/v3/" not in called_url
 
-        # Verify v3 call uses path-based symbols
-        v3_call = mock_requests.get.call_args_list[1]
-        called_url = v3_call[0][0]
-        assert "/api/v3/quote/AAPL,MSFT" in called_url
-        # Symbols should NOT be in params for v3
-        assert "symbol" not in v3_call[1]["params"]
+    def test_endpoint_table_is_stable_only(self):
+        from etf_scanner import _FMP_ENDPOINTS
+
+        urls = [u for rungs in _FMP_ENDPOINTS.values() for u, _ in rungs]
+        assert urls and all("/stable/" in u for u in urls)
+        assert not any("/api/v3/" in u for u in urls)
 
     @patch("etf_scanner._requests_lib")
-    def test_both_fail_returns_none(self, mock_requests):
-        """When both stable and v3 fail, returns None."""
+    def test_stable_failure_returns_none(self, mock_requests):
+        """When the single /stable rung fails, returns None after one failure."""
         scanner = self._make_scanner()
         fail_resp = MagicMock()
         fail_resp.status_code = 500
@@ -172,7 +190,7 @@ class TestFMPEndpointFallback:
 
         result = scanner._fmp_request("quote", "AAPL")
         assert result is None
-        assert scanner.backend_stats()["fmp_failures"] == 2
+        assert scanner.backend_stats()["fmp_failures"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -269,14 +287,14 @@ class TestFMPQuoteFetch:
         """When retry returns BRK-B, it is cached under normalized BRK.B."""
         scanner = self._make_scanner()
 
-        # Batch call with normalized BRK.B: stable fails, v3 fails
+        # Batch call with normalized BRK.B fails (one /stable rung only)
         fail_resp = MagicMock()
         fail_resp.status_code = 500
         # Retry with original BRK-B: stable returns data with BRK-B symbol
         retry_resp = MagicMock()
         retry_resp.status_code = 200
         retry_resp.json.return_value = [{"symbol": "BRK-B", "pe": 10}]
-        mock_requests.get.side_effect = [fail_resp, fail_resp, retry_resp]
+        mock_requests.get.side_effect = [fail_resp, retry_resp]
 
         result = scanner._fetch_fmp_quotes(["BRK-B"])
         # Cache key is normalized to BRK.B despite API returning BRK-B
@@ -400,7 +418,7 @@ class TestFMPHistoricalFetch:
         """When retry returns BRK-B, result key is normalized to BRK.B."""
         scanner = self._make_scanner()
 
-        # Batch with normalized BRK.B: stable+v3 both fail
+        # Batch with normalized BRK.B fails (one /stable rung only)
         fail_resp = MagicMock()
         fail_resp.status_code = 500
         # Per-symbol retry with normalized BRK.B: fails
@@ -412,11 +430,9 @@ class TestFMPHistoricalFetch:
             "historical": [{"close": 400}],
         }
         mock_requests.get.side_effect = [
-            fail_resp,
-            fail_resp,  # batch stable+v3
-            fail_resp,
-            fail_resp,  # per-symbol BRK.B stable+v3
-            retry_resp,  # per-symbol BRK-B stable succeeds
+            fail_resp,  # batch BRK.B
+            fail_resp,  # per-symbol BRK.B
+            retry_resp,  # per-symbol BRK-B succeeds
         ]
 
         result = scanner._fetch_fmp_historical(["BRK-B"], timeseries=20)
