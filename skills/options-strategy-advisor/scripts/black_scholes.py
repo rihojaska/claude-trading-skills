@@ -31,8 +31,8 @@ Version: 1.0
 
 import math
 import sys
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import requests
