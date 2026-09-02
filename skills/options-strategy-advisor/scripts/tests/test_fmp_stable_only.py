@@ -142,6 +142,26 @@ class TestErrorObjectDegradesInsteadOfRaising:
         monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: self.ERROR_OBJECT)
         assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None
 
+    def test_malformed_historical_rows_are_a_miss(self, monkeypatch):
+        """Codex gate r3: a 200-OK payload with rows lacking a numeric close, a
+        non-dict row, or a non-list `historical` must degrade to None, never
+        raise KeyError/TypeError outside the failure boundary."""
+        cases = [
+            {"symbol": "AAPL", "historical": [{"date": "2026-08-01"}]},
+            {"symbol": "AAPL", "historical": [{"close": "n/a"}]},
+            {"symbol": "AAPL", "historical": ["oops"]},
+            {"symbol": "AAPL", "historical": {"close": 1.0}},
+            [{"close": 1.0}, "oops"],
+        ]
+        for payload in cases:
+            monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: payload)
+            assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None, payload
+        monkeypatch.setattr(
+            black_scholes, "fmp_get",
+            lambda *_a, **_k: {"symbol": "AAPL", "historical": [{"close": 2.0}, {"adjClose": 1.5, "close": 1.0}]},
+        )
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") == [1.5, 2.0]
+
     def test_non_dict_list_element_is_a_miss(self, monkeypatch):
         """MUTANT: guard only the dict case -> `["oops"][0].get` raises."""
         monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: ["oops"])

@@ -403,11 +403,29 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
                 historical = entry.get("historical", [])
                 break
 
-    if historical:
-        historical = historical[:days]
-        historical = historical[::-1]  # Reverse to chronological order
-        # stable shape compat: EOD endpoint exposes `close`, not `adjClose`
-        return [item.get("adjClose") or item["close"] for item in historical]
+    # Validate every row BEFORE indexing: a 200-OK payload with a non-list
+    # `historical`, a non-dict row, or a row without a numeric close is
+    # malformed evidence and must degrade to None like a transport failure —
+    # not raise KeyError/TypeError outside the failure boundary (codex gate r3).
+    if isinstance(historical, list) and historical:
+        rows = historical[:days][::-1]  # Reverse to chronological order
+        closes = []
+        for item in rows:
+            if not isinstance(item, dict):
+                closes = None
+                break
+            # stable shape compat: EOD endpoint exposes `close`, not `adjClose`
+            px = item.get("adjClose")
+            if not isinstance(px, (int, float)) or isinstance(px, bool):
+                px = item.get("close")
+            if not isinstance(px, (int, float)) or isinstance(px, bool):
+                closes = None
+                break
+            closes.append(px)
+        if closes:
+            return closes
+        print(f"Error fetching prices for {symbol}: /stable historical payload malformed")
+        return None
 
     print(f"Error fetching prices for {symbol}: /stable historical returned no data")
     return None
