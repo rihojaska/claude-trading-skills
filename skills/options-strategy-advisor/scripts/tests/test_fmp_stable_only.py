@@ -169,6 +169,30 @@ class TestErrorObjectDegradesInsteadOfRaising:
         )
         assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") == [1.5, 2.0]
 
+    def test_malformed_bar_beyond_the_days_prefix_still_rejects(self, monkeypatch):
+        """Codex gate r5: validate the WHOLE response before truncating."""
+        rows = [{"close": 1.0}] * 3 + [{"close": "n/a"}]
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: {"historical": rows})
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k", days=2) is None
+        entries = [{"symbol": "AAPL", "historical": [{"close": 1.0}]}, None]
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: {"historicalStockList": entries})
+        assert black_scholes.fetch_historical_prices_for_hv("AAPL", "k") is None
+
+    def test_profile_sentinels_degrade_to_zero_yield(self, monkeypatch):
+        """Codex gate r5: 'N/A' / NaN / missing price must not raise TypeError."""
+        for row in (
+            {"lastDividend": "N/A", "price": 100.0},
+            {"lastDividend": 1.0, "price": "N/A"},
+            {"lastDividend": 1.0},
+            {"lastDividend": float("nan"), "price": 100.0},
+            {"lastDividend": 1.0, "price": 0},
+            {"lastDividend": True, "price": 100.0},
+        ):
+            monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: [row])
+            assert black_scholes.get_dividend_yield("AAPL", "k") == 0, row
+        monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: [{"lastDiv": 2.0, "price": 50.0}])
+        assert black_scholes.get_dividend_yield("AAPL", "k") == 0.04
+
     def test_non_dict_list_element_is_a_miss(self, monkeypatch):
         """MUTANT: guard only the dict case -> `["oops"][0].get` raises."""
         monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: ["oops"])

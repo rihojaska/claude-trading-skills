@@ -404,26 +404,20 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
         historical = data["historical"]
     elif isinstance(data, dict) and "historicalStockList" in data:
         entries = data["historicalStockList"]
-        if isinstance(entries, list):
+        # Every container entry is validated, not just up to the first match
+        # (codex gate r5): one malformed entry anywhere rejects the payload.
+        if isinstance(entries, list) and all(isinstance(e, dict) for e in entries):
             for entry in entries:
-                if not isinstance(entry, dict):
-                    historical = None
-                    break
                 if str(entry.get("symbol", "")).replace("-", ".") == symbol.replace("-", "."):
                     historical = entry.get("historical")
                     break
 
     if isinstance(historical, list) and historical:
-        rows = historical[:days][::-1]  # Reverse to chronological order
-        closes: list[float] = []
-        for item in rows:
-            px = _finite_positive_price(item)
-            if px is None:
-                closes = []
-                break
-            closes.append(px)
-        if closes:
-            return closes
+        # Validate the WHOLE response before truncating to `days` — malformed
+        # bars beyond the selected prefix still reject the payload (r5).
+        prices = [_finite_positive_price(item) for item in historical]
+        if all(px is not None for px in prices):
+            return prices[:days][::-1]  # Reverse to chronological order
         print(f"Error fetching prices for {symbol}: /stable historical payload malformed")
         return None
 
@@ -478,12 +472,20 @@ def get_dividend_yield(symbol, api_key):
         # /stable/profile renamed lastDiv -> lastDividend; accept either.
         last_div = data[0].get("lastDividend")
         if last_div is None:
-            last_div = data[0].get("lastDiv", 0)
-        last_div = last_div or 0
-        price = data[0].get("price", 1) or 1
-        return (last_div / price) if price > 0 else 0
+            last_div = data[0].get("lastDiv")
+        price = data[0].get("price")
+        # Both must be finite numbers (a 200-OK "N/A" sentinel is not a
+        # number) — the arithmetic below sits outside the transport try and
+        # must degrade to 0, never raise TypeError (codex gate r5).
+        if not _is_finite_number(last_div) or not _is_finite_number(price):
+            return 0
+        return (last_div / price) if last_div > 0 and price > 0 else 0
 
     return 0
+
+
+def _is_finite_number(v) -> bool:
+    return (not isinstance(v, bool)) and isinstance(v, (int, float)) and math.isfinite(v)
 
 
 # =============================================================================
