@@ -224,6 +224,27 @@ class TestReconcileFlagPairs:
         assert _reconcile_flag_pairs(args2) == set()
         assert args2.margin_debt_date is None
 
+    def test_empty_string_date_is_no_date(self, capsys):
+        """`--put-call 0.8 --put-call-date ""` (unset shell var) must be UNDATED,
+        not paired — else the value dodges the 0.70 penalty (codex gate r2 P2)."""
+        from market_top_detector import _reconcile_flag_pairs, compute_data_freshness
+
+        args = self._args(put_call=0.8, put_call_date="   ")
+        undated = _reconcile_flag_pairs(args)
+
+        assert args.put_call_date is None
+        assert undated == {"put_call"}
+        assert "--put-call-date" in capsys.readouterr().err
+        fresh = compute_data_freshness({"put_call_date": args.put_call_date}, undated_present=undated)
+        assert fresh["put_call"] == {"date": None, "age_days": None, "factor": 0.70}
+        assert fresh["overall_confidence"] == 0.70
+
+        # value absent + empty date = absent pair, silent
+        args = self._args(put_call_date="")
+        assert _reconcile_flag_pairs(args) == set()
+        assert args.put_call_date is None
+        assert capsys.readouterr().err == ""
+
     def test_correct_pair_untouched_and_silent(self, capsys):
         from market_top_detector import _reconcile_flag_pairs
 

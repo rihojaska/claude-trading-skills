@@ -194,6 +194,13 @@ def _reconcile_flag_pairs(args) -> set[str]:
     for label, (value_dest, date_dest) in _FLAG_PAIRS.items():
         value = getattr(args, value_dest, None)
         date_value = getattr(args, date_dest, None)
+        if isinstance(date_value, str) and not date_value.strip():
+            # An empty/whitespace date (an unset shell variable expanded into
+            # `--x-date ""`) is NO date: normalize before pairing, else the
+            # value would be scored as paired and dodge the 0.70 undated
+            # penalty (codex gate r2 P2).
+            date_value = None
+            setattr(args, date_dest, None)
 
         if value is None and date_value is not None:
             print(
