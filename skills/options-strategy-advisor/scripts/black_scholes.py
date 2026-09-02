@@ -29,7 +29,9 @@ Author: Claude Trading Skills
 Version: 1.0
 """
 
+import math
 import sys
+from typing import Optional
 from pathlib import Path
 
 import numpy as np
@@ -389,37 +391,35 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
     except Exception:
         data = None
 
-    historical = None
     # /stable returns a flat OHLCV list; fmp_compat reshapes it to the legacy
-    # {"symbol", "historical"} dict. Accept both — the direct fallback path
-    # sees the flat list, which the pre-existing dict-only parsing dropped.
+    # {"symbol", "historical"} dict. Accept both. Every container and row is
+    # validated BEFORE any dereference and the WHOLE payload is rejected on the
+    # first malformed element — a shortened series is laundered evidence
+    # (codex gate r3/r4): no filtering, no KeyError/TypeError/AttributeError
+    # outside the transport failure boundary.
+    historical = None
     if isinstance(data, list):
-        historical = [r for r in data if isinstance(r, dict)]
+        historical = data
     elif isinstance(data, dict) and "historical" in data:
         historical = data["historical"]
     elif isinstance(data, dict) and "historicalStockList" in data:
-        for entry in data["historicalStockList"]:
-            if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
-                historical = entry.get("historical", [])
-                break
+        entries = data["historicalStockList"]
+        if isinstance(entries, list):
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    historical = None
+                    break
+                if str(entry.get("symbol", "")).replace("-", ".") == symbol.replace("-", "."):
+                    historical = entry.get("historical")
+                    break
 
-    # Validate every row BEFORE indexing: a 200-OK payload with a non-list
-    # `historical`, a non-dict row, or a row without a numeric close is
-    # malformed evidence and must degrade to None like a transport failure —
-    # not raise KeyError/TypeError outside the failure boundary (codex gate r3).
     if isinstance(historical, list) and historical:
         rows = historical[:days][::-1]  # Reverse to chronological order
-        closes = []
+        closes: list[float] = []
         for item in rows:
-            if not isinstance(item, dict):
-                closes = None
-                break
-            # stable shape compat: EOD endpoint exposes `close`, not `adjClose`
-            px = item.get("adjClose")
-            if not isinstance(px, (int, float)) or isinstance(px, bool):
-                px = item.get("close")
-            if not isinstance(px, (int, float)) or isinstance(px, bool):
-                closes = None
+            px = _finite_positive_price(item)
+            if px is None:
+                closes = []
                 break
             closes.append(px)
         if closes:
@@ -428,6 +428,21 @@ def fetch_historical_prices_for_hv(symbol, api_key, days=90):
         return None
 
     print(f"Error fetching prices for {symbol}: /stable historical returned no data")
+    return None
+
+
+def _finite_positive_price(item) -> Optional[float]:
+    """adjClose (preferred) or close of one EOD row as a finite, strictly
+    positive float; None when the row is not a dict or carries no such price.
+    JSON-decoded NaN/Infinity, zero and negatives are malformed evidence."""
+    if not isinstance(item, dict):
+        return None
+    for key in ("adjClose", "close"):
+        px = item.get(key)
+        if isinstance(px, bool) or not isinstance(px, (int, float)):
+            continue
+        if math.isfinite(px) and px > 0:
+            return float(px)
     return None
 
 

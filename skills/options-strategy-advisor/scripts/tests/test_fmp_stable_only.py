@@ -152,6 +152,13 @@ class TestErrorObjectDegradesInsteadOfRaising:
             {"symbol": "AAPL", "historical": ["oops"]},
             {"symbol": "AAPL", "historical": {"close": 1.0}},
             [{"close": 1.0}, "oops"],
+            {"symbol": "AAPL", "historicalStockList": [None]},
+            {"symbol": "AAPL", "historicalStockList": "nope"},
+            {"symbol": "AAPL", "historical": [{"close": float("nan")}]},
+            {"symbol": "AAPL", "historical": [{"close": float("inf")}]},
+            {"symbol": "AAPL", "historical": [{"close": 0}]},
+            {"symbol": "AAPL", "historical": [{"close": -3.5}]},
+            {"symbol": "AAPL", "historical": [{"adjClose": True, "close": True}]},
         ]
         for payload in cases:
             monkeypatch.setattr(black_scholes, "fmp_get", lambda *_a, **_k: payload)
