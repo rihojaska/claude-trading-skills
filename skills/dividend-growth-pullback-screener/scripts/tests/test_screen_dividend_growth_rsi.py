@@ -193,7 +193,11 @@ def test_fmp_decimal_roe_and_margin_are_converted_to_percent(monkeypatch):
         "sector": "Tech",
     }
     client.get_dividend_history.return_value = [{}]
-    client.get_historical_prices.return_value = [{"close": 100}] * 30
+    # Non-flat series: a genuinely flat 30-bar close series is now correctly
+    # caught by the frozen/thin price series guard (see test_frozen_series.py)
+    # and would short-circuit this test before it reaches the ROE/margin
+    # assertions this test exists to check.
+    client.get_historical_prices.return_value = [{"close": 100 + i * 0.5} for i in range(30)]
     client.get_income_statement.return_value = [{}]
     client.get_balance_sheet.return_value = [{}]
     client.get_cash_flow.return_value = [{}]

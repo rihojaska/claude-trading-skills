@@ -564,6 +564,47 @@ class RSICalculator:
         return round(rsi, 2)
 
 
+def _series_is_frozen_30d(prices: list[float], *, min_bars: int = 20, max_range_pct: float = 3.0) -> bool:
+    """
+    Detect a frozen/thinly-updated 30-calendar-day price series that would
+    manufacture a meaningless RSI reading.
+
+    RSI is scale-free, so a series that barely moves for weeks can still
+    register as "oversold" purely from noise. Founding case: SDR.L printed
+    RSI 33.5 on 2026-09-03 while sitting 0.92% off its 52-week high — its
+    last twelve closes were 587.9/588.4/588.9/588.4/588.4/588.4/588.4/
+    588.4/588.9/589.4/584.5/584.0, a 2.04% 4-month range. A true oversold
+    read looks different: same day, IGG.L gapped 1706→1460→1371→1360→
+    1350→1312 (a real -21% move, RSI 18) and must NOT be flagged frozen.
+
+    This is the 30-day-window variant of this repo's producer-side 60-bar
+    frozen-series predicate — this screener only fetches 30 calendar days
+    of history (see `get_historical_prices(symbol, days=30)`), so the
+    window and default thresholds are sized for that shorter series.
+
+    Args:
+        prices: Closing prices for the fetched window (any order).
+        min_bars: Minimum number of bars required to classify the series;
+            fewer bars are not classifiable and are treated as not frozen.
+        max_range_pct: A (max-min)/max*100 range below this threshold is
+            considered frozen.
+
+    Returns:
+        True if the series is frozen/thin, False otherwise (including when
+        there are too few bars to classify).
+    """
+    if len(prices) < min_bars:
+        return False
+
+    hi = max(prices)
+    lo = min(prices)
+    if hi <= 0:
+        return False
+
+    range_pct = (hi - lo) / hi * 100
+    return range_pct < max_range_pct
+
+
 class StockAnalyzer:
     """Analyze stock fundamentals and dividend growth."""
 
@@ -998,6 +1039,7 @@ def screen_dividend_growth_pullbacks(
     print("Note: Analysis will continue until API rate limit is reached\n", file=sys.stderr)
 
     results = []
+    frozen_series_skipped = 0
 
     for i, stock in enumerate(candidates, 1):
         symbol = stock.get("symbol", "")
@@ -1069,6 +1111,17 @@ def screen_dividend_growth_pullbacks(
 
         if rsi is None:
             print("  ⚠️  RSI calculation failed", file=sys.stderr)
+            continue
+
+        if _series_is_frozen_30d(prices):
+            hi, lo = max(prices), min(prices)
+            range_pct = (hi - lo) / hi * 100 if hi > 0 else 0.0
+            print(
+                f"  ⚠️  frozen/thin price series ({range_pct:.2f}% 30d range) — "
+                f"RSI {rsi} not meaningful, skipped",
+                file=sys.stderr,
+            )
+            frozen_series_skipped += 1
             continue
 
         if rsi > rsi_max:
@@ -1186,6 +1239,8 @@ def screen_dividend_growth_pullbacks(
     print(f"\n{'=' * 80}", file=sys.stderr)
     print("Screening Complete!", file=sys.stderr)
     print(f"Qualified Stocks: {len(results)}", file=sys.stderr)
+    if frozen_series_skipped:
+        print(f"Frozen/thin price series skipped: {frozen_series_skipped}", file=sys.stderr)
     print(f"{'=' * 80}\n", file=sys.stderr)
 
     return results
