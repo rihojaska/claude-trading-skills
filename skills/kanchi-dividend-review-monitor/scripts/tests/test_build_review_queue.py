@@ -292,3 +292,29 @@ def test_main_with_output_dir(tmp_path) -> None:
 
     report = json.loads(json_files[0].read_text())
     assert report["summary"]["OK"] == 1
+
+
+def test_t1_attested_suspension_is_visible_ok_not_silent() -> None:
+    holding = {"ticker": "GEO", "dividend": {"latest_regular": None, "prior_regular": None,
+                                             "is_missing": False,
+                                             "suspended": {"since": "2021-04-07", "last_payment": "2021-01-15",
+                                                           "attested": True}}}
+    finding = t1_dividend_cut_or_suspension(holding)
+    assert finding is not None and finding.status == "OK" and "suspended since 2021-04-07" in finding.reason
+    report = build_report({"holdings": [holding]})
+    assert report["summary"] == {"OK": 1, "WARN": 0, "REVIEW": 0}
+    assert "GEO (OK)" in render_markdown(report) and "suspended since 2021-04-07" in render_markdown(report)
+
+
+def test_t1_reinstatement_after_attested_suspension_warns_unless_a_cut_fires() -> None:
+    warn = t1_dividend_cut_or_suspension({"ticker": "GEO", "dividend": {
+        "latest_regular": 0.30, "prior_regular": 0.25, "is_missing": False,
+        "suspended_attested_but_paying": True, "suspended_since": "2021-04-07"}})
+    assert warn is not None and warn.status == "WARN" and "reinstatement" in warn.reason
+    cut = t1_dividend_cut_or_suspension({"ticker": "GEO", "dividend": {
+        "latest_regular": 0.10, "prior_regular": 0.25, "is_missing": False,
+        "suspended_attested_but_paying": True, "suspended_since": "2021-04-07"}})
+    assert cut is not None and cut.status == "REVIEW"
+    plain = t1_dividend_cut_or_suspension({"ticker": "GEO", "dividend": {
+        "latest_regular": 0.30, "prior_regular": 0.25, "is_missing": False}})
+    assert plain is None

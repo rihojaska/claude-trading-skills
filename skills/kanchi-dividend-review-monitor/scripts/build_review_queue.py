@@ -78,6 +78,24 @@ def t1_dividend_cut_or_suspension(holding: dict[str, Any]) -> TriggerFinding | N
             evidence={"latest_regular": latest, "prior_regular": prior, "is_missing": missing},
         )
 
+    # Producer-attested suspension (dividend_policy: suspended + suspended_since):
+    # the payer stopped on a known date and nothing newer was paid. Not a cut to
+    # evaluate — but never silent: an OK-status finding keeps it visible in the
+    # report's Findings section.
+    suspended = dividend.get("suspended")
+    if isinstance(suspended, dict) and suspended.get("attested") and latest is None:
+        return TriggerFinding(
+            trigger="T1",
+            status="OK",
+            reason=(f"Dividend suspended since {suspended.get('since')} (attested; last payment "
+                    f"{suspended.get('last_payment')}) — no cut to evaluate."),
+            evidence={"suspended": suspended},
+        )
+    # A payment NEWER than the attested suspension date: reinstatement is a
+    # policy event the producer must re-attest — surface it (WARN) unless a cut
+    # is firing below (REVIEW outranks it).
+    reinstated = bool(dividend.get("suspended_attested_but_paying"))
+
     if latest is not None and latest <= 0:
         return TriggerFinding(
             trigger="T1",
@@ -92,6 +110,16 @@ def t1_dividend_cut_or_suspension(holding: dict[str, Any]) -> TriggerFinding | N
             status="REVIEW",
             reason="Latest regular dividend is lower than prior regular dividend by more than 1%.",
             evidence={"latest_regular": latest, "prior_regular": prior},
+        )
+
+    if reinstated:
+        return TriggerFinding(
+            trigger="T1",
+            status="WARN",
+            reason=(f"Payment newer than the attested suspension date "
+                    f"{dividend.get('suspended_since')} — reinstatement; re-attest dividend_policy."),
+            evidence={"latest_regular": latest, "prior_regular": prior,
+                      "suspended_since": dividend.get("suspended_since")},
         )
 
     return None
