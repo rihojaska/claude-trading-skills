@@ -226,7 +226,7 @@ def _yf_statements(symbol: str, kind: str, limit: int = 5) -> list[dict]:
                 value = float(frame.loc[label, col])
             except (TypeError, ValueError, KeyError):
                 continue
-            if value != value:  # NaN
+            if not math.isfinite(value):  # NaN / ±inf (nested gate r2 P2)
                 continue
             row[key] = value
         rows.append(row)
@@ -264,7 +264,7 @@ def _yf_key_metrics(symbol: str) -> list[dict]:
                      ("returnOnEquity", "roe"), ("profitMargins", "netProfitMargin"),
                      ("payoutRatio", "payoutRatio")):
         value = info.get(src)
-        if isinstance(value, (int, float)) and value == value:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             row[key] = float(value)
     return [row] if len(row) > 2 else []
 
@@ -583,8 +583,12 @@ class FMPClient:
                 if isinstance(data, dict) and data.get("historicalStockList"):
                     for entry in data["historicalStockList"]:
                         if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
-                            self._endpoint_failures[base_url] = 0
-                            return entry.get("historical", [])[:days]
+                            # An EMPTY matched entry is a miss too (nested gate r2 P2):
+                            # it must fall through to the yfinance leg below.
+                            if entry.get("historical"):
+                                self._endpoint_failures[base_url] = 0
+                                return entry["historical"][:days]
+                            break
                 self._record_endpoint_failure(base_url)
             except Exception:
                 self._record_endpoint_failure(base_url)
@@ -1260,7 +1264,6 @@ def screen_dividend_growth_pullbacks(
     # completed, no matches" from "screen could not run".
     outcomes = {"qualified": 0, "rejected_by_criteria": 0, "unavailable_input": 0}
     unavailable_reasons: dict[str, int] = {}
-    unanalyzed = 0
 
     def _unavailable(reason: str) -> None:
         outcomes["unavailable_input"] += 1
@@ -1282,7 +1285,6 @@ def screen_dividend_growth_pullbacks(
                 f"Returning results collected so far: {len(results)} qualified stocks",
                 file=sys.stderr,
             )
-            unanalyzed = len(candidates) - (i - 1)
             break
 
         # Get current price
@@ -1448,10 +1450,20 @@ def screen_dividend_growth_pullbacks(
         elif payout_ratio:
             dividend_sustainable = payout_ratio < 80
 
+        # Provenance (nested gate r2 P2): which leg supplied each evidence class.
+        data_sources = {
+            "quote": stock.get("data_source", "fmp"),
+            "dividends": (dividend_history.get("data_source", "fmp")
+                          if isinstance(dividend_history, dict) else "fmp"),
+            "prices": historical_prices[0].get("data_source", "fmp"),
+            "fundamentals": balance_sheet[0].get("data_source", "fmp"),
+        }
+
         # Build result object
         result = {
             "symbol": symbol,
             "company_name": company_name,
+            "data_sources": data_sources,
             "sector": stock.get("sector", "Unknown"),
             "market_cap": stock.get("marketCap", 0),
             "price": current_price,
@@ -1493,11 +1505,30 @@ def screen_dividend_growth_pullbacks(
     print(f"Qualified Stocks: {len(results)}", file=sys.stderr)
     if frozen_series_skipped:
         print(f"Frozen/thin price series skipped: {frozen_series_skipped}", file=sys.stderr)
-    print(_format_outcomes(len(candidates) - unanalyzed, outcomes, unavailable_reasons, unanalyzed),
+    # Every candidate that reached a terminal outcome is counted in exactly one
+    # bucket; anything else (a rate-limit break at ANY fetch, mid-analysis
+    # included — nested gate r2 P2) is unanalyzed.
+    analyzed = sum(outcomes.values())
+    print(_format_outcomes(analyzed, outcomes, unavailable_reasons, len(candidates) - analyzed),
           file=sys.stderr)
     print(f"{'=' * 80}\n", file=sys.stderr)
 
     return results
+
+
+def _format_stock_sources(stock: dict) -> str:
+    sources = stock.get("data_sources") or {}
+    return ", ".join(f"{k}={v}" for k, v in sources.items()) or "fmp"
+
+
+def _describe_data_sources(results: list[dict]) -> str:
+    """Header provenance line: FMP-only, or FMP + the yfinance leg when any
+    qualified stock carries yfinance evidence (per-stock detail in each
+    section's `Data sources` row and the JSON `data_sources`)."""
+    legs = {v for r in results for v in (r.get("data_sources") or {}).values()}
+    if "yfinance" in legs:
+        return "Financial Modeling Prep API + yfinance free-tier leg (see per-stock `Data sources`)"
+    return "Financial Modeling Prep API"
 
 
 def generate_markdown_report(results: list[dict], criteria: dict, output_path: str):
@@ -1506,7 +1537,7 @@ def generate_markdown_report(results: list[dict], criteria: dict, output_path: s
     report = f"""# Dividend Growth Pullback Screening Report
 
 **Generated:** {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC
-**Data Source:** Financial Modeling Prep API
+**Data Source:** {_describe_data_sources(results)}
 
 ## Executive Summary
 
@@ -1588,6 +1619,7 @@ def generate_markdown_report(results: list[dict], criteria: dict, output_path: s
 | Metric | Value | Interpretation |
 |--------|-------|----------------|
 | RSI (14-period) | **{stock["rsi"]:.1f}** | {rsi_interpretation} |
+| Data sources | {_format_stock_sources(stock)} | per evidence class (fmp = FMP /stable, yfinance = free-tier leg) |
 | Entry Timing | {
                 "Immediate - Scale in 50%"
                 if stock["rsi"] < 30

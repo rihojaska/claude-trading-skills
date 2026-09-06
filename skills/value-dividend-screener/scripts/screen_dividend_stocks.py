@@ -569,8 +569,12 @@ class FMPClient:
                 if isinstance(data, dict) and data.get("historicalStockList"):
                     for entry in data["historicalStockList"]:
                         if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
-                            self._endpoint_failures[base_url] = 0
-                            return entry.get("historical", [])[:days]
+                            # An EMPTY matched entry is a miss too (nested gate r2 P2):
+                            # it must fall through to the yfinance leg below.
+                            if entry.get("historical"):
+                                self._endpoint_failures[base_url] = 0
+                                return entry["historical"][:days]
+                            break
                 self._record_endpoint_failure(base_url)
             except Exception:
                 self._record_endpoint_failure(base_url)
@@ -1375,6 +1379,7 @@ def screen_value_dividend_stocks(
 
         # Store RSI for later filtering
         stock["_rsi"] = rsi
+        stock["_price_source"] = historical_prices[0].get("data_source", "fmp")
 
         # Fetch profile for sector information if not already present
         if not stock.get("sector") or stock.get("sector") == "N/A":
@@ -1475,6 +1480,7 @@ def screen_value_dividend_stocks(
             "pe_ratio": _valid_ratio(stock.get("pe")),
             "pb_ratio": _valid_ratio(stock.get("priceToBook")),
             "rsi": rsi,
+            "price_data_source": stock.get("_price_source", "fmp"),
             "dividend_cagr_3y": round(div_cagr, 2),
             "dividend_consistent": div_consistent,
             "dividend_stable": dividend_stability["is_stable"],

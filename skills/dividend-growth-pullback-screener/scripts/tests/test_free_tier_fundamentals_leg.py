@@ -175,3 +175,52 @@ def test_loop_counts_criteria_rejections_separately(monkeypatch, capsys):
     err = capsys.readouterr().err
     assert results == []
     assert "Outcomes: analyzed 1 · qualified 0 · rejected_by_criteria 1 · unavailable_input 0 · unanalyzed 0" in err
+
+
+# ── nested gate r2 P2 folds ────────────────────────────────────────────────────
+
+def test_empty_matched_historical_entry_falls_through_to_yfinance(monkeypatch):
+    client = mod.FMPClient(api_key="dummy")
+    payload = {"historicalStockList": [{"symbol": "ALV.DE", "historical": []}]}
+    monkeypatch.setattr(client, "_request", lambda *a, **k: payload)
+    yf_rows = [{"date": "2026-09-04", "close": 1.0, "data_source": "yfinance"}]
+    monkeypatch.setattr(mod, "_yf_price_history", lambda *a, **k: yf_rows)
+    assert client.get_historical_prices("ALV.DE", days=30) == yf_rows
+
+
+def test_fundamentals_legs_reject_non_finite_values(monkeypatch):
+    income = _frame({"Total Revenue": [float("inf"), 300.0], "Net Income": [40.0, float("-inf")]}, COLS[:2])
+    _fake_yf(monkeypatch, income=income, info={"trailingPE": float("inf"), "priceToBook": 2.0, "payoutRatio": True})
+    rows = mod._yf_statements("X", "income_stmt")
+    assert "revenue" not in rows[0] and "netIncome" not in rows[1]
+    km = mod._yf_key_metrics("X")[0]
+    assert "peRatio" not in km and km["pbRatio"] == 2.0 and "payoutRatio" not in km
+
+
+def test_rate_limit_break_mid_analysis_counts_as_unanalyzed(monkeypatch, capsys):
+    client = _FakeClient(served="GOOD")
+
+    def limited_prices(symbol, days=30):
+        client.rate_limit_reached = True  # limit hit AFTER the dividend fetch, before RSI
+        return None
+    client.get_historical_prices = limited_prices
+    monkeypatch.setattr(mod, "FMPClient", lambda api_key: client)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    assert mod.screen_dividend_growth_pullbacks("dummy", universe_symbols=["GOOD", "COLD"]) == []
+    err = capsys.readouterr().err
+    assert "Outcomes: analyzed 0 · qualified 0 · rejected_by_criteria 0 · unavailable_input 0 · unanalyzed 2" in err
+
+
+def test_results_and_report_carry_provenance(monkeypatch, tmp_path, capsys):
+    client = _FakeClient(served="GOOD")
+    real_bs = client.get_balance_sheet
+    client.get_balance_sheet = lambda symbol, limit=5: [dict(real_bs(symbol, limit)[0], data_source="yfinance")]
+    monkeypatch.setattr(mod, "FMPClient", lambda api_key: client)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    results = mod.screen_dividend_growth_pullbacks("dummy", universe_symbols=["GOOD"])
+    assert results[0]["data_sources"] == {"quote": "fmp", "dividends": "fmp", "prices": "fmp", "fundamentals": "yfinance"}
+    out = tmp_path / "r.md"
+    mod.generate_markdown_report(results, {"dividend_yield_min": 1.5, "dividend_cagr_min": 12.0, "rsi_max": 40.0}, str(out))
+    text = out.read_text()
+    assert "yfinance free-tier leg" in text and "| Data sources | quote=fmp, dividends=fmp, prices=fmp, fundamentals=yfinance |" in text
+    assert "## 1. GOOD - GOOD" in text  # the consumer's section shape is unchanged
