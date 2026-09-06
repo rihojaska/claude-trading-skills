@@ -197,6 +197,17 @@ def _prepare_params_for_url(url: str, params: dict | None) -> dict:
     return prepared
 
 
+def _symbol_from_url(url: str) -> str | None:
+    """`symbol` query parameter embedded in a (translated) URL, or None."""
+    try:
+        from urllib.parse import parse_qs, urlparse
+
+        values = parse_qs(urlparse(url).query).get("symbol") or []
+    except ValueError:
+        return None
+    return values[0] if values and values[0] else None
+
+
 def _normalize_historical_stock_list(data: dict, symbol: str | None, limit: int | None = None) -> Any:
     """Fold the legacy multi-symbol `{"historicalStockList": [{symbol, historical}]}`
     shape into the single-symbol `{symbol, historical}` contract every fmp_get
@@ -513,7 +524,11 @@ def fmp_get(
             if "historical-price-eod/full" in url and isinstance(data, list):
                 return _normalize_eod_flat_list(data, base_params.get("symbol"), historical_limit)
             if "historical-price-eod/full" in url and isinstance(data, dict) and "historicalStockList" in data:
-                return _normalize_historical_stock_list(data, base_params.get("symbol"), historical_limit)
+                # The requested symbol may live in the URL (path-form v3 URL
+                # translated to `?symbol=`, or a stable URL with the query
+                # inline) rather than in params (codex nested gate r5 P2).
+                requested = base_params.get("symbol") or _symbol_from_url(url)
+                return _normalize_historical_stock_list(data, requested, historical_limit)
             return data
 
         # If we got here, inner loop ended without return → try next key

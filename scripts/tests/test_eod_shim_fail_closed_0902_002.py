@@ -87,3 +87,23 @@ def test_fmp_get_routes_historical_stock_list_through_the_fold(monkeypatch):
     monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k"])
     out = fmp_compat.fmp_get("https://financialmodelingprep.com/stable/historical-price-eod/full", {"symbol": "AAPL"})
     assert out == {"symbol": "AAPL", "historical": [{"date": "2026-01-02", "close": 1.0}]}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://financialmodelingprep.com/api/v3/historical-price-full/AAPL",      # path form → translated to ?symbol=
+        "https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=AAPL",  # inline query
+    ],
+)
+def test_fold_uses_the_symbol_embedded_in_the_url(monkeypatch, url):
+    class _R:
+        status_code, ok, text, headers = 200, True, "", {}
+        url = ""
+        def json(self):
+            return {"historicalStockList": [{"symbol": "AAPL", "historical": [{"date": "2026-01-02", "close": 1.0}]}]}
+    monkeypatch.setattr(fmp_compat, "_original_get", lambda *a, **k: _R())
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k"])
+    assert fmp_compat.fmp_get(url) == {"symbol": "AAPL", "historical": [{"date": "2026-01-02", "close": 1.0}]}
+    assert fmp_compat._symbol_from_url("https://x/y?symbol=BRK-B&limit=5") == "BRK-B"
+    assert fmp_compat._symbol_from_url("https://x/y") is None
