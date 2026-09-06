@@ -209,9 +209,23 @@ def main():
     print("Step 4: Generating Reports")
     print("-" * 70)
 
+    # Data date for the exposure-coach (WPP-20260901-018): the coach ages an
+    # input by its own data date and treats generated_at as the LAST resort,
+    # so an artifact carrying only generated_at could never self-flag stale.
+    # Histories are most-recent-first (index 0 = latest bar); the OLDEST
+    # latest-bar across every history the computation used governs — a newer
+    # S&P bar must not hide an older QQQ input (weakest link, fail-closed).
+    latest_bar_dates = [
+        str(h[0]["date"])[:10]
+        for h in (sp500_history, qqq_history)
+        if h and isinstance(h[0], dict) and h[0].get("date")
+    ]
+    latest_data_date = min(latest_bar_dates) if latest_bar_dates else None
+
     analysis = {
         "metadata": {
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "latest_data_date": latest_data_date,
             "api_calls": client.get_api_stats(),
             "data_coverage": data_coverage,
             "index_prices": {
