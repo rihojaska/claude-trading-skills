@@ -36,7 +36,7 @@ class SkillConfig:
     budget: bool  # family B: ApiCallBudgetExceeded + max_api_calls=200
     hist_days: int  # get_historical_prices default `days`
     hist_return_list: bool  # earnings: unwrap to list[dict] (else dict)
-    has_compat: bool  # vendor _fmp_compat.py and import v3_to_stable
+    has_compat: bool  # legacy flag, always False now — retained for schema stability
     feature_lines: tuple[str, ...]  # extra "- ..." module-docstring feature bullets
     class_constants: tuple[tuple[str, str], ...]  # (name, literal) class attributes
     extensions: tuple[str, ...]  # extension module names appended to the FMPClient body
@@ -63,7 +63,7 @@ SKILLS: dict[str, SkillConfig] = {
         budget=True,
         hist_days=90,
         hist_return_list=False,
-        has_compat=True,
+        has_compat=False,
         feature_lines=_FAMILY_B_FEATURES,
         class_constants=(),
         extensions=("family_b_profiles",),
@@ -76,7 +76,7 @@ SKILLS: dict[str, SkillConfig] = {
         budget=True,
         hist_days=250,
         hist_return_list=True,
-        has_compat=True,
+        has_compat=False,
         query_auth=True,
         feature_lines=_FAMILY_B_FEATURES,
         class_constants=(
@@ -95,7 +95,7 @@ SKILLS: dict[str, SkillConfig] = {
         budget=True,
         hist_days=90,
         hist_return_list=False,
-        has_compat=True,
+        has_compat=False,
         feature_lines=_FAMILY_B_FEATURES,
         class_constants=(),
         extensions=("family_b_profiles",),
@@ -108,7 +108,7 @@ SKILLS: dict[str, SkillConfig] = {
         budget=False,
         hist_days=365,
         hist_return_list=False,
-        has_compat=True,
+        has_compat=False,
         feature_lines=_FAMILY_A_FEATURES,
         class_constants=(),
         extensions=("sp500_constituents", "family_a_quote"),
@@ -122,7 +122,7 @@ SKILLS: dict[str, SkillConfig] = {
         budget=False,
         hist_days=365,
         hist_return_list=False,
-        has_compat=True,
+        has_compat=False,
         feature_lines=_FAMILY_A_FEATURES,
         class_constants=(),
         extensions=("sp500_constituents", "family_a_quote", "parabolic"),

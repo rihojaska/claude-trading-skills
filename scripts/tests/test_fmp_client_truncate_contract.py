@@ -19,6 +19,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import fmp_compat  # noqa: E402
 
 FMP_CLIENT_FILES = [
     "skills/canslim-screener/scripts/fmp_client.py",
@@ -76,14 +80,26 @@ def test_get_historical_prices_truncates_to_days(client_path, monkeypatch):
     module = _load_fmp_module(client_path)
 
     mock_response = _build_mock_response(5)
-    # ftd/macro/market-top transport via module-level fmp_compat.fmp_get
-    # (returns parsed JSON); the template-family clients use requests.Session.
-    if hasattr(module, "fmp_get"):
-        monkeypatch.setattr(module, "fmp_get", lambda url, params=None, **_kw: mock_response.json())
+    # Every client here routes its FMP historical call through fmp_compat —
+    # either `fmp_get_typed` (pead/earnings-trade/ibd/vcp/parabolic/canslim,
+    # which now pass `timeseries` straight through to fmp_compat) or the
+    # bare-None `fmp_get` wrapper (ftd/macro/market-top). Drive the REAL
+    # transport through a stubbed lowest-level `_original_get` so the genuine
+    # fold+truncate logic (`_tm_limit` -> historical_limit) executes
+    # end-to-end for every client, rather than re-testing it via a client-side
+    # mock that could silently drift from what fmp_compat actually does.
+    if hasattr(module, "fmp_get_typed") or hasattr(module, "fmp_get"):
+
+        def fake_get(url, params=None, timeout=None):
+            return mock_response
+
+        monkeypatch.setattr(fmp_compat, "_original_get", fake_get)
+        monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["test_key"])
+        monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
         transport_patch = patch.object(
-            module.requests.Session,
+            module.requests,
             "get",
-            side_effect=AssertionError("fmp_get client must not use session transport"),
+            side_effect=AssertionError("fmp_compat-routed client must not fall back to raw GET"),
         )
     else:
         transport_patch = patch.object(module.requests.Session, "get", return_value=mock_response)

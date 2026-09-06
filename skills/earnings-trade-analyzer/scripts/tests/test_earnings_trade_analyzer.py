@@ -8,6 +8,7 @@ scorer, report generator, and FMP client edge cases.
 
 import json
 import os
+import sys
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -17,9 +18,33 @@ from calculators.ma50_calculator import calculate_ma50_position
 from calculators.ma200_calculator import calculate_ma200_position
 from calculators.pre_earnings_trend_calculator import calculate_pre_earnings_trend
 from calculators.volume_trend_calculator import calculate_volume_trend
-from fmp_client import ApiCallBudgetExceeded, FMPClient
 from report_generator import generate_json_report, generate_markdown_report
 from scorer import COMPONENT_WEIGHTS, calculate_composite_score
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import fmp_compat  # noqa: E402
+from fmp_client import ApiCallBudgetExceeded, FMPClient  # noqa: E402
+
+
+def _mock_response(status_code, json_payload, text=""):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.ok = status_code < 400
+    resp.json.return_value = json_payload
+    resp.text = text
+    return resp
+
+
+def _drive_real_transport(monkeypatch, get_response):
+    """Wire the client's `fmp_get_typed` to the REAL `fmp_compat` transport,
+    stubbed at the lowest level (`_original_get`) so key-failover, retry, and
+    fold/truncate logic all run for real."""
+    monkeypatch.setattr(fmp_compat, "_original_get", get_response)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["test_key"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -890,52 +915,51 @@ class TestReportGenerator:
 class TestFMPClient:
     """Test FMP client error handling and budget enforcement."""
 
-    @patch("fmp_client.requests.Session")
-    def test_api_key_is_sent_as_query_parameter(self, mock_session_cls):
-        """FMP v3 authentication is carried in params, never a session header."""
-        response = MagicMock(status_code=200)
-        response.json.return_value = {"ok": True}
-        mock_session = MagicMock()
-        mock_session.get.return_value = response
-        mock_session_cls.return_value = mock_session
+    def test_api_key_is_sent_as_query_parameter(self, monkeypatch):
+        """FMP authentication is carried in params, never a session header.
+
+        Uses a caller-supplied key that differs from the ambient
+        FMP_API_KEY, exercising `key_override` end-to-end — so
+        `get_fmp_keys` must read the real (monkeypatched-env) environment
+        rather than being stubbed to a fixed list."""
+        captured = {}
+
+        def get_response(url, params=None, timeout=None):
+            captured["url"], captured["params"], captured["timeout"] = url, dict(params or {}), timeout
+            return _mock_response(200, {"ok": True})
+
+        monkeypatch.setattr(fmp_compat, "_original_get", get_response)
+        monkeypatch.setenv("FMP_API_KEY", "ambient-key")  # pragma: allowlist secret
+        monkeypatch.delenv("FMP_FALLBACK_API_KEY", raising=False)
+        monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
         client = FMPClient(api_key="query-key", max_api_calls=1)  # pragma: allowlist secret
         client.RATE_LIMIT_DELAY = 0
 
         assert client._rate_limited_get("https://example.test", {"symbol": "AAPL"}) == {"ok": True}
-        mock_session.get.assert_called_once_with(
-            "https://example.test",
-            params={"symbol": "AAPL", "apikey": "query-key"},  # pragma: allowlist secret
-            timeout=30,
-        )
-        assert "apikey" not in mock_session.headers
+        assert captured["url"] == "https://example.test"
+        assert captured["params"] == {"symbol": "AAPL", "apikey": "query-key"}  # pragma: allowlist secret
 
-    @patch("fmp_client.requests.Session")
-    def test_api_429_retry(self, mock_session_cls):
-        """429 response triggers retry, sets rate_limit_reached on second failure."""
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
+    def test_api_429_retry(self, monkeypatch):
+        """429 on every key -> rate_limit_reached latches, result is None."""
 
-        # First call returns 429, second also 429 (exceeds max_retries=1)
-        mock_response_429 = MagicMock()
-        mock_response_429.status_code = 429
-        mock_response_429.text = "Rate limit exceeded"
-        mock_session.get.return_value = mock_response_429
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(429, None, text="Rate limit exceeded")
 
+        _drive_real_transport(monkeypatch, get_response)
         client = FMPClient(api_key="test_key", max_api_calls=200)
         result = client._rate_limited_get("http://example.com/test")
 
         assert result is None
         assert client.rate_limit_reached is True
 
-    @patch("fmp_client.requests.Session")
-    def test_api_timeout(self, mock_session_cls):
-        """requests.Timeout returns None without crashing."""
+    def test_api_timeout(self, monkeypatch):
+        """requests.Timeout on every attempt returns None without crashing."""
         import requests as req
 
-        mock_session = MagicMock()
-        mock_session_cls.return_value = mock_session
-        mock_session.get.side_effect = req.exceptions.Timeout("Connection timed out")
+        def get_response(url, params=None, timeout=None):
+            raise req.exceptions.Timeout("Connection timed out")
 
+        _drive_real_transport(monkeypatch, get_response)
         client = FMPClient(api_key="test_key", max_api_calls=200)
         result = client._rate_limited_get("http://example.com/test")
 

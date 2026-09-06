@@ -5,6 +5,12 @@ Covers the two hardcoded-v3 call sites:
   all tiers; the hyphenated name is the live one, pinned in _PATH_RENAME_NO_SYMBOL)
 - get_company_profiles   -> per-symbol /stable/profile (stable rejects comma
   batching, so the method must issue one request per symbol)
+
+Every FMP call is now delegated through `fmp_compat.fmp_get_typed`
+(S-FMPCLIENT-3, 2026-09-06) — no client-owned session. These tests drive the
+REAL `fmp_compat.fmp_get_typed` through a stubbed lowest-level
+`_original_get` so the genuine transport (key failover, retries) executes
+end-to-end.
 """
 
 import os
@@ -12,8 +18,12 @@ import sys
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-from fmp_client import FMPClient
+import fmp_compat  # noqa: E402
+from fmp_client import FMPClient  # noqa: E402
 
 
 def _make_client():
@@ -23,21 +33,28 @@ def _make_client():
 def _mock_response(status_code, json_payload, text=""):
     resp = MagicMock()
     resp.status_code = status_code
+    resp.ok = status_code < 400
     resp.json.return_value = json_payload
     resp.text = text
     return resp
 
 
+def _drive_real_transport(monkeypatch, get_response):
+    monkeypatch.setattr(fmp_compat, "_original_get", get_response)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["test_key"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
+
+
 class TestEarningsCalendarMigration:
-    def test_earnings_calendar_hits_stable_hyphen(self):
+    def test_earnings_calendar_hits_stable_hyphen(self, monkeypatch):
         client = _make_client()
         seen = []
 
-        def mock_get(url, params=None, timeout=None):
-            seen.append((url, params or {}))
+        def get_response(url, params=None, timeout=None):
+            seen.append((url, dict(params or {})))
             return _mock_response(200, [{"symbol": "AAPL", "date": "2026-06-01"}])
 
-        client.session.get = mock_get
+        _drive_real_transport(monkeypatch, get_response)
         result = client.get_earnings_calendar("2026-06-01", "2026-06-08")
 
         assert len(seen) == 1
@@ -51,17 +68,17 @@ class TestEarningsCalendarMigration:
 
 
 class TestCompanyProfilesPerSymbol:
-    def test_profiles_issued_one_request_per_symbol_on_stable(self):
+    def test_profiles_issued_one_request_per_symbol_on_stable(self, monkeypatch):
         client = _make_client()
         seen = []
 
-        def mock_get(url, params=None, timeout=None):
+        def get_response(url, params=None, timeout=None):
             params = params or {}
-            seen.append((url, params))
+            seen.append((url, dict(params)))
             sym = params.get("symbol")
             return _mock_response(200, [{"symbol": sym, "marketCap": 1000}])
 
-        client.session.get = mock_get
+        _drive_real_transport(monkeypatch, get_response)
         result = client.get_company_profiles(["AAPL", "MSFT"])
 
         # Two symbols -> two separate /stable/profile?symbol= calls (no comma batch)

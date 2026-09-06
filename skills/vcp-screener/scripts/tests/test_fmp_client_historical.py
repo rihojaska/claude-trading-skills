@@ -1,12 +1,23 @@
-"""Issue #64: stable/historical-price-eod/full normalization for vcp-screener."""
+"""Issue #64: stable/historical-price-eod/full normalization for vcp-screener.
+
+The client no longer folds/truncates the EOD flat-list itself — it delegates
+to `fmp_compat.fmp_get_typed`, which folds and truncates before returning
+(S-FMPCLIENT-3, 2026-09-06). These tests drive the REAL `fmp_get_typed`
+through a stubbed lowest-level `_original_get` so that pipeline runs
+end-to-end.
+"""
 
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-from fmp_client import FMPClient
+import fmp_compat  # noqa: E402
+from fmp_client import FMPClient  # noqa: E402
 
 
 def _make_client():
@@ -18,43 +29,52 @@ def _make_client():
 def _mock_response(status_code, json_payload, text=""):
     resp = MagicMock()
     resp.status_code = status_code
+    resp.ok = status_code < 400
     resp.json.return_value = json_payload
     resp.text = text
     return resp
 
 
-class TestEODFlatListSuccess:
-    @patch("fmp_client.requests.Session")
-    def test_get_historical_prices_normalizes_flat_list(self, mock_session_class):
-        """Flat list response -> dict contract preserved."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = _mock_response(
-            200,
-            [
-                {
-                    "symbol": "SPY",
-                    "date": "2026-04-29",
-                    "open": 500.0,
-                    "high": 502.0,
-                    "low": 499.0,
-                    "close": 501.0,
-                    "volume": 1_000_000,
-                },
-                {
-                    "symbol": "SPY",
-                    "date": "2026-04-28",
-                    "open": 498.0,
-                    "high": 501.0,
-                    "low": 497.0,
-                    "close": 500.0,
-                    "volume": 1_100_000,
-                },
-            ],
-        )
-        mock_session_class.return_value = mock_session
+def _drive_real_transport(monkeypatch, get_response):
+    monkeypatch.setattr(fmp_compat, "_original_get", get_response)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["test_key"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
 
+
+class TestEODFlatListSuccess:
+    def test_get_historical_prices_normalizes_flat_list(self, monkeypatch):
+        """Flat list response -> dict contract preserved, request carries
+        `timeseries` through to fmp_compat's own from/to conversion."""
+        calls = []
+
+        def get_response(url, params=None, timeout=None):
+            calls.append((url, dict(params or {})))
+            return _mock_response(
+                200,
+                [
+                    {
+                        "symbol": "SPY",
+                        "date": "2026-04-29",
+                        "open": 500.0,
+                        "high": 502.0,
+                        "low": 499.0,
+                        "close": 501.0,
+                        "volume": 1_000_000,
+                    },
+                    {
+                        "symbol": "SPY",
+                        "date": "2026-04-28",
+                        "open": 498.0,
+                        "high": 501.0,
+                        "low": 497.0,
+                        "close": 500.0,
+                        "volume": 1_100_000,
+                    },
+                ],
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
         client = _make_client()
-        client.session = mock_session
 
         result = client.get_historical_prices("SPY", days=2)
         assert isinstance(result, dict), f"expected dict, got {type(result).__name__}"
@@ -62,83 +82,60 @@ class TestEODFlatListSuccess:
         assert len(result["historical"]) == 2
         assert result["historical"][0]["close"] == 501.0
 
-        first_call = mock_session.get.call_args_list[0]
-        url = first_call[0][0]
-        params = first_call[1]["params"]
+        assert len(calls) == 1
+        url, params = calls[0]
         assert "historical-price-eod/full" in url
+        assert params.get("symbol") == "SPY"
+        # The client passes `timeseries` straight through; fmp_compat's own
+        # `_prepare_params_for_url` converts it to from/to before the wire
+        # call (and pops it into an internal `_tm_limit` truncation bound).
         assert "from" in params and "to" in params
         assert "timeseries" not in params
 
 
-class TestFallbackTransparency:
-    """When stable fails and the client falls back to v3, the user must
-    see WHY the first endpoint was skipped — otherwise they get the v3
-    'Legacy Endpoint' error with no context."""
+class TestFailureIsSilentAndTyped:
+    """FMP has no v3 fallback any more (WPP-20260827-012) — a failed call
+    surfaces `None` with a typed `_last_error`, not a second endpoint."""
 
-    @patch("fmp_client.requests.Session")
-    def test_stable_error_surfaced_when_falling_back_to_v3(self, mock_session_class, capsys):
-        """403 on stable, 403 on v3 — both errors must appear in stderr."""
-        mock_session = MagicMock()
-        mock_session.get.side_effect = [
-            _mock_response(
-                403,
-                None,
-                text='{"Error Message": "Special Endpoint: This symbol is not available..."}',
-            ),
-            _mock_response(
-                403,
-                None,
-                text='{"Error Message": "Legacy Endpoint: only legacy users..."}',
-            ),
-        ]
-        mock_session_class.return_value = mock_session
+    def test_stable_failure_yields_none_with_typed_error(self, monkeypatch):
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                403, None, text='{"Error Message": "Special Endpoint: not available..."}'
+            )
 
+        _drive_real_transport(monkeypatch, get_response)
         client = _make_client()
-        client.session = mock_session
 
         result = client.get_historical_prices("GOOG", days=10)
         assert result is None
+        assert client._last_error is not None
+        assert fmp_compat.reason_kind(client._last_error) == "rate_limited"
 
-        captured = capsys.readouterr()
-        # Both endpoints' errors must be visible.
-        assert "Special Endpoint" in captured.err, (
-            f"stable endpoint error not surfaced. stderr:\n{captured.err}"
-        )
-        assert "Legacy Endpoint" in captured.err, (
-            f"v3 endpoint error missing. stderr:\n{captured.err}"
-        )
-        # The user should also see which endpoint was tried first / fell back to.
-        assert "stable" in captured.err.lower() or "fallback" in captured.err.lower(), (
-            f"no fallback context in stderr:\n{captured.err}"
-        )
+    def test_stable_success_suppresses_warning(self, monkeypatch, capsys):
+        """Happy path: no spurious warnings on stderr."""
 
-    @patch("fmp_client.requests.Session")
-    def test_stable_success_suppresses_warning(self, mock_session_class, capsys):
-        """Happy path: stable succeeds, no fallback warning emitted."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = _mock_response(
-            200,
-            [
-                {
-                    "symbol": "AAPL",
-                    "date": "2026-01-01",
-                    "open": 1.0,
-                    "high": 1.0,
-                    "low": 1.0,
-                    "close": 1.0,
-                    "volume": 1000,
-                }
-            ],
-        )
-        mock_session_class.return_value = mock_session
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200,
+                [
+                    {
+                        "symbol": "AAPL",
+                        "date": "2026-01-01",
+                        "open": 1.0,
+                        "high": 1.0,
+                        "low": 1.0,
+                        "close": 1.0,
+                        "volume": 1000,
+                    }
+                ],
+            )
 
+        _drive_real_transport(monkeypatch, get_response)
         client = _make_client()
-        client.session = mock_session
 
         result = client.get_historical_prices("AAPL", days=1)
         assert result is not None
 
         captured = capsys.readouterr()
-        # Happy path must stay quiet — no spurious warnings.
         assert "WARN" not in captured.err, f"unexpected stderr:\n{captured.err}"
         assert "fallback" not in captured.err.lower()

@@ -1,9 +1,10 @@
-"""FMP /api/v3 → /stable migration tests for vcp-screener.
+"""FMP /api/v3 -> /stable migration tests for vcp-screener.
 
-Proves the hardcoded-v3 call site (get_sp500_constituents) now targets
-/stable, and that the stable→v3 fallback list (get_quote / get_historical
-via _request_with_fallback) is left intact — i.e. a v3 fallback URL is
-still attempted as a real /api/v3/ request, not rewritten back to stable.
+Every FMP call is now stable-only and delegated through
+`fmp_compat.fmp_get_typed` (S-FMPCLIENT-3, 2026-09-06) — no client-owned
+session, no v3 rung. These tests drive the REAL `fmp_compat.fmp_get_typed`
+through a stubbed lowest-level `_original_get` so the genuine transport
+(key failover, retries) executes end-to-end.
 """
 
 import os
@@ -11,8 +12,12 @@ import sys
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
-from fmp_client import FMPClient
+import fmp_compat  # noqa: E402
+from fmp_client import FMPClient  # noqa: E402
 
 
 def _make_client():
@@ -22,23 +27,30 @@ def _make_client():
 def _mock_response(status_code, json_payload, text=""):
     resp = MagicMock()
     resp.status_code = status_code
+    resp.ok = status_code < 400
     resp.json.return_value = json_payload
     resp.text = text
     return resp
 
 
-class TestHardcodedCallSiteMigratedToStable:
-    """Methods that bypass the fallback list now build /stable URLs."""
+def _drive_real_transport(monkeypatch, get_response):
+    monkeypatch.setattr(fmp_compat, "_original_get", get_response)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["test_key"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
 
-    def test_sp500_constituents_hits_stable(self):
+
+class TestHardcodedCallSiteMigratedToStable:
+    """Methods that used to bypass the fallback list build /stable URLs."""
+
+    def test_sp500_constituents_hits_stable(self, monkeypatch):
         client = _make_client()
         seen = []
 
-        def mock_get(url, params=None, timeout=None):
+        def get_response(url, params=None, timeout=None):
             seen.append((url, params or {}))
             return _mock_response(200, [{"symbol": "AAPL"}, {"symbol": "MSFT"}])
 
-        client.session.get = mock_get
+        _drive_real_transport(monkeypatch, get_response)
         result = client.get_sp500_constituents()
 
         assert len(seen) == 1
@@ -48,22 +60,21 @@ class TestHardcodedCallSiteMigratedToStable:
         assert result == [{"symbol": "AAPL"}, {"symbol": "MSFT"}]
 
 
-class TestFallbackContractPreserved:
-    """The stable→v3 fallback list must still reach a real /api/v3/ URL."""
+class TestNoV3Rung:
+    """FMP retired v3 for non-legacy keys — there is no second endpoint to
+    fall back to any more (WPP-20260827-012); a failed stable call goes
+    straight to None (or the public-CSV fallback for constituents)."""
 
-    def test_quote_stable_403_falls_back_to_real_v3(self):
+    def test_quote_stable_403_yields_none(self, monkeypatch):
         client = _make_client()
-        seen = []
+        calls = []
 
-        def mock_get(url, params=None, timeout=None):
-            seen.append(url)
-            if "stable" in url:
-                return _mock_response(403, None, text="Forbidden")
-            return _mock_response(200, [{"symbol": "^GSPC", "price": 5500.0}])
+        def get_response(url, params=None, timeout=None):
+            calls.append(url)
+            return _mock_response(403, None, text="Forbidden")
 
-        client.session.get = mock_get
+        _drive_real_transport(monkeypatch, get_response)
         result = client.get_quote("^GSPC")
 
-        # Fallback must have attempted a genuine /api/v3/ URL (not a rewritten stable URL)
-        assert any("/api/v3/" in u for u in seen)
-        assert result == [{"symbol": "^GSPC", "price": 5500.0}]
+        assert result is None
+        assert all("/api/v3/" not in u for u in calls)

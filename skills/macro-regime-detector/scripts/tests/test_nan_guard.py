@@ -170,12 +170,17 @@ def test_fmp_batch_stocklist_nan_falls_back_to_yf(capsys):
 
 def test_rejection_is_loud_and_caches_nothing(capsys):
     client = fc.FMPClient(api_key="test_key")  # pragma: allowlist secret
-    fmp_rows = [
-        {"symbol": "SPY", "date": "2026-08-21", "open": 1.0, "high": 2.0, "low": 0.5, "close": NAN, "volume": 10}
-    ]
+    # Folded dict shape — the real fmp_get already folds a flat EOD list
+    # before returning (the client no longer folds this itself, S-FMPCLIENT-3).
+    payload = {
+        "symbol": "SPY",
+        "historical": [
+            {"date": "2026-08-21", "open": 1.0, "high": 2.0, "low": 0.5, "close": NAN, "volume": 10}
+        ],
+    }
 
     def fake_fmp_get(url, params=None, **_kw):
-        return fmp_rows if "historical-price-eod" in url else None
+        return payload if "historical-price-eod" in url else None
 
     transport = patch.dict(type(client)._rate_limited_get.__globals__, {"fmp_get": fake_fmp_get})
     with transport, patch.object(fc, "_yf_history", lambda *a, **k: None):

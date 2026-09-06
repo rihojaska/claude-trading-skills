@@ -42,7 +42,7 @@ SPECIAL_BANNER = (
 )
 
 # Flags referenced by ``# @@IF <flag>`` markers in the template.
-FLAGS = ("has_quote", "budget", "has_compat", "hist_return_list", "query_auth")
+FLAGS = ("has_quote", "budget", "hist_return_list")
 
 
 def _load_registry() -> dict:
@@ -132,17 +132,9 @@ def render_fmp_client(cfg) -> str:
     return text.rstrip("\n") + "\n"
 
 
-def render_compat() -> str:
-    """The canonical ``_fmp_compat.py`` (byte-identical to the PR0 vendored shim)."""
-    return (SRC_DIR / "compat_v3_to_stable.py.tmpl").read_text(encoding="utf-8")
-
-
 def _targets(cfg) -> list[tuple[Path, str]]:
     scripts_dir = REPO_ROOT / "skills" / cfg.skill / "scripts"
-    targets = [(scripts_dir / "fmp_client.py", render_fmp_client(cfg))]
-    if cfg.has_compat:
-        targets.append((scripts_dir / "_fmp_compat.py", render_compat()))
-    return targets
+    return [(scripts_dir / "fmp_client.py", render_fmp_client(cfg))]
 
 
 def main() -> int:

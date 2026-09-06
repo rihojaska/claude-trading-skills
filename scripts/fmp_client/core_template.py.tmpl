@@ -7,7 +7,7 @@ Provides rate-limited access to Financial Modeling Prep API endpoints.
 
 Features:
 - Rate limiting (0.3s between requests)
-- Automatic retry on 429 errors
+- Automatic key failover via fmp_compat (repo-root transport)
 - Session caching for duplicate requests
 @@FEATURES@@
 """
@@ -15,7 +15,7 @@ Features:
 import os
 import sys
 import time
-from datetime import date, timedelta
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -24,15 +24,29 @@ except ImportError:
     print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
     sys.exit(1)
 
-# @@IF has_compat
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+# @@IF budget
 try:
-    from _fmp_compat import v3_to_stable
-except ModuleNotFoundError:  # loaded by file path (e.g. repo-level contract tests)
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from _fmp_compat import v3_to_stable
+    from fmp_compat import fmp_get_typed, key_override, request_count
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get_typed = None
+# @@ELSE
+try:
+    from fmp_compat import fmp_get_typed, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get_typed = None
 # @@ENDIF
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
+
+# --- FMP endpoint: stable only. FMP retired v3 for non-legacy keys on
+# 2025-08-31; a v3 URL requested through fmp_compat is rewritten back to the
+# equivalent stable endpoint anyway (see `_V3_TO_STABLE` in the repo-root
+# fmp_compat.py), so a second "v3 fallback" entry here was never a distinct
+# endpoint — it was a second, rate-limited query of the SAME stable endpoint
+# (WPP-20260827-012). ---
 
 
 # @@IF has_quote
@@ -42,89 +56,28 @@ def _stable_quote_url(base, symbols_str, params):
     return base, params
 
 
-def _v3_quote_url(base, symbols_str, params):
-    """api/v3/quote/^GSPC"""
-    return f"{base}/{symbols_str}", params
-
-
 # @@ENDIF
 def _stable_hist_url(base, symbols_str, params):
-    """stable/historical-price-eod/full?symbol=^GSPC&from=...&to=..."""
+    """stable/historical-price-eod/full?symbol=^GSPC&timeseries=80
+
+    `timeseries` is passed through unchanged — fmp_compat's own
+    `_prepare_params_for_url` converts it into a from/to range plus an
+    internal `_tm_limit` truncation bound before the request is made.
+    """
     params["symbol"] = symbols_str
-    # New stable EOD endpoint ignores `timeseries`; convert to from/to range
-    # to bound the payload. Use 2x calendar days to cover N trading days
-    # (trading-day/calendar-day ratio ~252/365 ~0.69, so *2 leaves headroom).
-    days = params.pop("timeseries", None)
-    if days is not None:
-        today = date.today()
-        params["from"] = (today - timedelta(days=int(days) * 2)).isoformat()
-        params["to"] = today.isoformat()
     return base, params
-
-
-def _v3_hist_url(base, symbols_str, params):
-    """api/v3/historical-price-full/^GSPC?timeseries=80"""
-    return f"{base}/{symbols_str}", params
 
 
 _FMP_ENDPOINTS = {
 # @@IF has_quote
     "quote": [
         ("https://financialmodelingprep.com/stable/quote", _stable_quote_url),
-        ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
 # @@ENDIF
     "historical": [
         ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
     ],
 }
-
-
-def _normalize_eod_flat_list(data, symbols_str: str, limit: Optional[int] = None):
-    """Convert stable/historical-price-eod/full flat list to v3-compatible dict.
-
-    Input  : [{"symbol": "SPY", "date": "...", "open": ..., ...}, ...]
-    Output : {"symbol": "SPY", "historical": [{"date": ..., "open": ..., ...}, ...]}
-
-    Returns the input unchanged if not a list (passthrough for v3 dict /
-    historicalStockList responses). Returns None when no row matches the
-    requested symbol; the caller will record the failure and try the next
-    endpoint.
-
-    If `limit` is provided (the original `timeseries=N` request), the
-    `historical` list is truncated to the first `limit` entries. The new
-    EOD endpoint ignores `timeseries` and returns the full available history,
-    so the caller's date-range bounding plus this truncation together preserve
-    the legacy "most-recent N rows" contract. Truncation assumes descending
-    date order, which the FMP EOD endpoint provides (verified live).
-
-    Note: empty list ``[]`` does not reach this normalizer because the caller's
-    ``if not data: continue`` falsy check handles it earlier in
-    ``_request_with_fallback``.
-    """
-    if not isinstance(data, list):
-        return data
-    if not data:
-        return None
-    norm_target = symbols_str.replace("-", ".")
-    matched_symbol = None
-    historical = []
-    for row in data:
-        if not isinstance(row, dict):
-            continue
-        # Be permissive: single-symbol endpoint may omit per-row "symbol".
-        # Treat missing symbol as belonging to the requested symbols_str.
-        row_sym = row.get("symbol") or symbols_str
-        if row_sym.replace("-", ".") != norm_target:
-            continue
-        matched_symbol = matched_symbol or row_sym
-        historical.append({k: v for k, v in row.items() if k != "symbol"})
-    if not historical:
-        return None
-    if limit is not None and limit > 0:
-        historical = historical[:limit]
-    return {"symbol": matched_symbol or symbols_str, "historical": historical}
 
 
 # @@IF budget
@@ -158,11 +111,6 @@ class FMPClient:
                 "FMP API key required. Set FMP_API_KEY environment variable "
                 "or pass api_key parameter."
             )
-        self.session = requests.Session()
-# @@IF query_auth
-# @@ELSE
-        self.session.headers.update({"apikey": self.api_key})
-# @@ENDIF
         self.cache = {}
         self.last_call_time = 0
         self.rate_limit_reached = False
@@ -179,6 +127,20 @@ class FMPClient:
         # so _request_with_fallback can surface suppressed errors even when
         # an endpoint was called with quiet=True.
         self._last_error: Optional[str] = None
+
+    def _raw_stable_get(self, url: str, params: dict) -> Optional[dict]:
+        """Thin standalone fallback when fmp_compat is not importable — a
+        `.skill` archive bundles this file but not the repo-root
+        `fmp_compat.py` (verified via `unzip -l`). One request, no key
+        failover, no v3 rung; sets `_last_error` on any miss."""
+        try:
+            response = requests.get(url, params={**params, "apikey": self.api_key}, timeout=30)
+            if response.status_code == 200:
+                return response.json()
+        except (requests.exceptions.RequestException, ValueError):
+            pass
+        self._last_error = "fmp_compat unavailable: raw stable GET, no failover"
+        return None
 
     def _rate_limited_get(
         self, url: str, params: Optional[dict] = None, quiet: bool = False
@@ -202,56 +164,63 @@ class FMPClient:
 
         if params is None:
             params = {}
-# @@IF query_auth
-        # FMP's v3 REST API authenticates via the `apikey` query parameter, not
-        # an HTTP header. Inject it on every request so auth actually succeeds
-        # (a header is silently ignored and every call would 401/403 -> None).
-        params = {**params, "apikey": self.api_key}
-# @@ENDIF
 
         elapsed = time.time() - self.last_call_time
         if elapsed < self.RATE_LIMIT_DELAY:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
 
-        try:
-            response = self.session.get(url, params=params, timeout=30)
+        if fmp_get_typed is None:
+            if not getattr(self, "_warned_no_fmp_compat", False):
+                print(
+                    "WARNING: fmp_compat unavailable (standalone install) — "
+                    "using a single stable GET with no key failover",
+                    file=sys.stderr,
+                )
+                self._warned_no_fmp_compat = True
             self.last_call_time = time.time()
             self.api_calls_made += 1
+            return self._raw_stable_get(url, params)
 
-            if response.status_code == 200:
-                self.retry_count = 0
-                return response.json()
-            elif response.status_code == 429:
-                self.retry_count += 1
-                if self.retry_count <= self.max_retries:
-                    print("WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr)
-                    time.sleep(60)
-                    return self._rate_limited_get(url, params, quiet=quiet)
-                else:
-                    self._last_error = "HTTP 429 (daily rate limit)"
-                    print("ERROR: Daily API rate limit reached.", file=sys.stderr)
-                    self.rate_limit_reached = True
-                    return None
-            else:
-                msg = f"HTTP {response.status_code} - {response.text[:200]}"
-                self._last_error = msg
-                if not quiet:
-                    print(
-                        f"ERROR: API request failed: {msg}",
-                        file=sys.stderr,
-                    )
-                return None
-        except requests.exceptions.RequestException as e:
-            self._last_error = f"request exception: {e}"
-            print(f"ERROR: Request exception: {e}", file=sys.stderr)
-            return None
+        # A caller-supplied key differing from the ambient FMP_API_KEY is
+        # scoped to this call only; FMP_FALLBACK_API_KEY is never touched.
+        override = self.api_key if self.api_key != os.environ.get("FMP_API_KEY") else None
+# @@IF budget
+        before = request_count()
+        with key_override(override):
+            data, reason = fmp_get_typed(
+                url,
+                params=params,
+                timeout=30,
+                max_retries_per_key=1,
+                max_attempts=self.max_api_calls - self.api_calls_made,
+            )
+        # fmp_get_typed may retry and fail over keys: charge every HTTP
+        # attempt it actually made against the budget, never a flat 1.
+        self.api_calls_made += max(1, request_count() - before)
+# @@ELSE
+        with key_override(override):
+            data, reason = fmp_get_typed(url, params=params, timeout=30, max_retries_per_key=1)
+        self.api_calls_made += 1
+# @@ENDIF
+        self.last_call_time = time.time()
+        self._last_error = reason
+        if data is None:
+            # Only the 429 daily-quota signal latches the run-wide breaker;
+            # 402/403/soft-quota is usually a free-tier entitlement gap and
+            # `unreachable` is a transport blip — neither should stop the run.
+            if reason == "rate_limited:429":
+                self.rate_limit_reached = True
+            if not quiet:
+                print(f"ERROR: {url} failed ({reason})", file=sys.stderr)
+        return data
 
     def _request_with_fallback(self, endpoint_key, symbols_str, extra_params=None):
-        """Try stable endpoint first, fall back to v3 for legacy users.
-
-        Returns parsed JSON in v3-compatible shape, or None if all fail.
+        """Query the stable FMP endpoint(s); the loop shape stays even though
+        each endpoint list is now a single entry (fmp_compat already rewrites
+        a v3 URL back to the identical stable endpoint, so a second "v3
+        fallback" rung was never a distinct endpoint — WPP-20260827-012).
         Non-last endpoints are called with quiet=True so the user isn't
-        alarmed by an expected stable failure when v3 will catch it — but
+        alarmed by an expected failure when another entry will catch it — but
         when a non-last endpoint DOES fail, a WARN line is emitted explaining
         why we're falling back. Otherwise users only see the (often misleading)
         last-endpoint error and have no clue what really went wrong.
@@ -272,23 +241,6 @@ class FMPClient:
                 self._record_endpoint_failure(base_url)
                 self._warn_fallback(base_url, is_last, self._last_error)
                 continue
-
-            # Normalize new stable EOD flat-list shape to v3-compatible dict.
-            # No-op for v3 dict / historicalStockList responses.
-            # `timeseries` (original request) is passed as `limit` so the
-            # EOD endpoint's full-history response is truncated to the
-            # legacy "most-recent N rows" contract.
-            if endpoint_key == "historical":
-                limit = params.get("timeseries") if isinstance(params, dict) else None
-                data = _normalize_eod_flat_list(data, symbols_str, limit=limit)
-                if not data:
-                    self._record_endpoint_failure(base_url)
-                    self._warn_fallback(
-                        base_url,
-                        is_last,
-                        f"response had no rows matching '{symbols_str}'",
-                    )
-                    continue
 
             # Shape validation: reject truthy-but-wrong-shape responses
             valid = True

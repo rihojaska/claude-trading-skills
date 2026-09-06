@@ -2,11 +2,18 @@
 
 import os
 import sys
+from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+import fmp_compat  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Transport harness: the client transports via module-level fmp_compat.fmp_get
@@ -20,12 +27,22 @@ _ACTIVE: dict = {}
 
 
 def _fake_fmp_get(url, params=None, timeout=30, **_kw):
+    """Stand in for the real `fmp_compat.fmp_get`: apply its exact
+    timeseries->from/to + `_tm_limit` preparation, route the HTTP call
+    through the test's `client.session.get` mock, then fold+truncate an EOD
+    flat list the same way the real `fmp_get_typed` does — the client no
+    longer folds this itself (S-FMPCLIENT-3, 2026-09-06)."""
     client = _ACTIVE.get("client")
     assert client is not None, "transport used before _make_client()"
-    resp = client.session.get(url, params=params, timeout=timeout)
+    prepared = fmp_compat._prepare_params_for_url(url, params)
+    limit = prepared.pop("_tm_limit", None)
+    resp = client.session.get(url, params=prepared, timeout=timeout)
     if resp is None or getattr(resp, "status_code", 200) != 200:
         return None
-    return resp.json()
+    data = resp.json()
+    if "historical-price-eod/full" in url and isinstance(data, list):
+        return fmp_compat._normalize_eod_flat_list(data, prepared.get("symbol"), limit)
+    return data
 
 
 def _wire_fake_transport(client):

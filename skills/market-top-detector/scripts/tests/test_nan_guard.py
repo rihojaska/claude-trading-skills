@@ -16,11 +16,17 @@ recurring network-false-green trap).
 import datetime as _dt
 import os
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+REPO_ROOT = Path(__file__).resolve().parents[4]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import fmp_client as fc  # noqa: E402
+import fmp_compat  # noqa: E402
 
 NAN = float("nan")
 
@@ -207,6 +213,15 @@ def _client_with_fmp(payload_by_key):
     def fake_fmp_get(url, params=None, **_kw):
         for marker, payload in payload_by_key.items():
             if marker in url:
+                # Real fmp_get already folds a flat EOD list into a dict
+                # before returning (the client no longer folds this itself,
+                # S-FMPCLIENT-3) — replicate that fold here.
+                if marker == "historical-price-eod" and isinstance(payload, list):
+                    prepared = fmp_compat._prepare_params_for_url(url, params)
+                    limit = prepared.pop("_tm_limit", None)
+                    return fmp_compat._normalize_eod_flat_list(
+                        payload, prepared.get("symbol"), limit
+                    )
                 return payload
         return None
 

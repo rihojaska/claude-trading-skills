@@ -51,10 +51,8 @@
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        # Migrate hardcoded v3 URL to /stable (this method bypasses the
-        # _FMP_ENDPOINTS stable→v3 fallback list, so rewrite at the call site).
-        url, params = v3_to_stable(f"{self.BASE_URL}/sp500_constituent")
-        data = self._rate_limited_get(url, params)
+        url = "https://financialmodelingprep.com/stable/sp500-constituent"
+        data = self._rate_limited_get(url, {})
         if not data:
             # No FMP tier serves this list on some keys (402 on stable, 403
             # on v3) — fall back to the public dataset.

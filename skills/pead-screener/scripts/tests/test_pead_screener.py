@@ -10,6 +10,7 @@ generation, Mode B validation, FMP client error handling, and edge cases.
 import json
 import logging
 import os
+import sys
 import tempfile
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
@@ -21,7 +22,14 @@ from calculators.weekly_candle_calculator import (
     analyze_weekly_pattern,
     daily_to_weekly,
 )
-from fmp_client import ApiCallBudgetExceeded, FMPClient
+
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import fmp_compat  # noqa: E402
+import fmp_client  # noqa: E402
+from fmp_client import ApiCallBudgetExceeded, FMPClient  # noqa: E402
 from report_generator import generate_json_report, generate_markdown_report
 from scorer import COMPONENT_WEIGHTS, calculate_composite_score
 from screen_pead import (
@@ -979,36 +987,48 @@ class TestCalculatePriceGap:
 # ===========================================================================
 
 
-class TestFMPClient:
-    @patch("fmp_client.requests.Session")
-    def test_api_429(self, mock_session_class):
-        """Mock 429 -> rate_limit_reached, returns None."""
-        mock_session = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 429
-        mock_response.text = "Rate limit exceeded"
-        mock_session.get.return_value = mock_response
-        mock_session_class.return_value = mock_session
+def _mock_response(status_code, json_payload, text=""):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.ok = status_code < 400
+    resp.json.return_value = json_payload
+    resp.text = text
+    return resp
 
+
+def _drive_real_transport(monkeypatch, get_response):
+    """Wire the client's `fmp_get_typed` to the REAL `fmp_compat` transport,
+    stubbed at the lowest level (`_original_get`) so key-failover, retry, and
+    the EOD fold/truncate logic all run for real."""
+    monkeypatch.setattr(fmp_compat, "_original_get", get_response)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["test_key"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
+
+
+class TestFMPClient:
+    def test_api_429(self, monkeypatch):
+        """429 on every key -> rate_limit_reached, returns None."""
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(429, None, text="Rate limit exceeded")
+
+        _drive_real_transport(monkeypatch, get_response)
         client = FMPClient(api_key="test_key", max_api_calls=200)
-        client.session = mock_session
-        client.max_retries = 0  # Don't retry for test speed
+        client.max_retries = 0
 
         result = client.get_earnings_calendar("2026-02-01", "2026-02-15")
         assert result is None
         assert client.rate_limit_reached is True
 
-    @patch("fmp_client.requests.Session")
-    def test_api_timeout(self, mock_session_class):
-        """Mock Timeout -> returns None."""
+    def test_api_timeout(self, monkeypatch):
+        """Every attempt times out -> returns None, no exception raised."""
         import requests as req
 
-        mock_session = MagicMock()
-        mock_session.get.side_effect = req.exceptions.Timeout("Connection timed out")
-        mock_session_class.return_value = mock_session
+        def get_response(url, params=None, timeout=None):
+            raise req.exceptions.Timeout("Connection timed out")
 
+        _drive_real_transport(monkeypatch, get_response)
         client = FMPClient(api_key="test_key", max_api_calls=200)
-        client.session = mock_session
 
         result = client.get_historical_prices("AAPL", days=90)
         assert result is None
@@ -1024,89 +1044,76 @@ class TestFMPClient:
 
 
 class TestFMPHistoricalNormalizer:
-    """Cover stable/historical-price-eod/full flat-list normalization (Issue #64)."""
+    """Cover stable/historical-price-eod/full flat-list normalization (Issue #64),
+    driven through the real `fmp_compat.fmp_get_typed` transport."""
 
     @staticmethod
-    def _mock_response(status_code, json_payload):
-        resp = MagicMock()
-        resp.status_code = status_code
-        resp.json.return_value = json_payload
-        resp.text = ""
-        return resp
-
-    @staticmethod
-    def _make_client(mock_session):
+    def _make_client():
         client = FMPClient(api_key="test_key", max_api_calls=200)
-        client.session = mock_session
         client.max_retries = 0
         return client
 
-    @patch("fmp_client.requests.Session")
-    def test_eod_flat_list_truncated_to_days(self, mock_session_class):
-        """Contract: returned historical is truncated to `days` rows.
+    def test_eod_flat_list_truncated_to_days(self, monkeypatch):
+        """Contract: returned historical is truncated to `days` rows."""
 
-        The new EOD endpoint ignores `timeseries` and returns full history.
-        The normalizer must truncate so callers receive at most N rows,
-        preserving the legacy v3 `timeseries=N` contract.
-        """
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            [
-                {
-                    "symbol": "SPY",
-                    "date": f"2026-04-{30 - i:02d}",
-                    "open": 500.0,
-                    "high": 502.0,
-                    "low": 499.0,
-                    "close": 500.0 + i,
-                    "volume": 1_000_000,
-                }
-                for i in range(5)
-            ],
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200,
+                [
+                    {
+                        "symbol": "SPY",
+                        "date": f"2026-04-{30 - i:02d}",
+                        "open": 500.0,
+                        "high": 502.0,
+                        "low": 499.0,
+                        "close": 500.0 + i,
+                        "volume": 1_000_000,
+                    }
+                    for i in range(5)
+                ],
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=2)
         assert result is not None
-        # API returned 5 rows but we requested days=2; normalizer must truncate
         assert len(result["historical"]) == 2, (
             f"expected truncation to 2 rows, got {len(result['historical'])}"
         )
-        # Most recent first preserved
         assert result["historical"][0]["date"] == "2026-04-30"
         assert result["historical"][1]["date"] == "2026-04-29"
 
-    @patch("fmp_client.requests.Session")
-    def test_eod_flat_list_normalized(self, mock_session_class):
-        """New stable EOD flat list -> v3-compat dict with historical[]."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            [
-                {
-                    "symbol": "SPY",
-                    "date": "2026-04-29",
-                    "open": 500.0,
-                    "high": 502.0,
-                    "low": 499.0,
-                    "close": 501.0,
-                    "volume": 1_000_000,
-                },
-                {
-                    "symbol": "SPY",
-                    "date": "2026-04-28",
-                    "open": 498.0,
-                    "high": 501.0,
-                    "low": 497.0,
-                    "close": 500.0,
-                    "volume": 1_100_000,
-                },
-            ],
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+    def test_eod_flat_list_normalized(self, monkeypatch):
+        """Stable EOD flat list -> v3-compat dict with historical[]."""
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200,
+                [
+                    {
+                        "symbol": "SPY",
+                        "date": "2026-04-29",
+                        "open": 500.0,
+                        "high": 502.0,
+                        "low": 499.0,
+                        "close": 501.0,
+                        "volume": 1_000_000,
+                    },
+                    {
+                        "symbol": "SPY",
+                        "date": "2026-04-28",
+                        "open": 498.0,
+                        "high": 501.0,
+                        "low": 497.0,
+                        "close": 500.0,
+                        "volume": 1_100_000,
+                    },
+                ],
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=2)
         assert result is not None
@@ -1118,45 +1125,51 @@ class TestFMPHistoricalNormalizer:
             "row-level symbol should be stripped to mirror v3 shape"
         )
 
-    @patch("fmp_client.requests.Session")
-    def test_empty_list_falls_back_via_falsy_path(self, mock_session_class):
-        """Empty list response is caught by `if not data: continue` before normalizer."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(200, [])
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+    def test_empty_list_falls_back_via_falsy_path(self, monkeypatch):
+        """Empty list response -> fmp_compat folds to an empty-history dict
+        under the requested symbol (not a refusal); the dict is truthy so
+        the client returns it rather than None."""
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(200, [])
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=2)
-        # Both stable and v3 fallback see empty/None -> final result None
-        assert result is None
+        assert result == {"symbol": "SPY", "historical": []}
 
-    @patch("fmp_client.requests.Session")
-    def test_eod_symbol_mismatch_rejected(self, mock_session_class):
-        """List with no matching symbol -> normalizer returns None, fallback exhausted."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            [{"symbol": "QQQ", "date": "2026-04-29", "open": 1.0, "close": 1.0}],
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+    def test_eod_symbol_mismatch_yields_empty_history(self, monkeypatch):
+        """List with no matching symbol -> fmp_compat folds to empty history
+        under the requested symbol (`_normalize_eod_flat_list` only drops
+        non-matching rows, it does not refuse); the client's shape validation
+        accepts it since the folded `symbol` field matches the request."""
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200, [{"symbol": "QQQ", "date": "2026-04-29", "open": 1.0, "close": 1.0}]
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=2)
-        assert result is None
+        assert result == {"symbol": "SPY", "historical": []}
 
-    @patch("fmp_client.requests.Session")
-    def test_eod_row_without_symbol_field(self, mock_session_class):
+    def test_eod_row_without_symbol_field(self, monkeypatch):
         """Single-symbol endpoint may omit per-row 'symbol' -> treat as requested symbol."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            [
-                {"date": "2026-04-29", "open": 500.0, "close": 501.0},
-                {"date": "2026-04-28", "open": 498.0, "close": 500.0},
-            ],
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200,
+                [
+                    {"date": "2026-04-29", "open": 500.0, "close": 501.0},
+                    {"date": "2026-04-28", "open": 498.0, "close": 500.0},
+                ],
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=2)
         assert result is not None
@@ -1164,73 +1177,74 @@ class TestFMPHistoricalNormalizer:
         assert len(result["historical"]) == 2
         assert result["historical"][0]["close"] == 501.0
 
-    @patch("fmp_client.requests.Session")
-    def test_eod_index_symbol_normalized(self, mock_session_class):
+    def test_eod_index_symbol_normalized(self, monkeypatch):
         """Dot/dash normalization (BRK.B vs BRK-B style) works."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            [{"symbol": "BRK.B", "date": "2026-04-29", "open": 400.0, "close": 401.0}],
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200, [{"symbol": "BRK.B", "date": "2026-04-29", "open": 400.0, "close": 401.0}]
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("BRK-B", days=1)
         assert result is not None
         assert result["historical"][0]["close"] == 401.0
 
-    @patch("fmp_client.requests.Session")
-    def test_legacy_v3_dict_passthrough(self, mock_session_class):
-        """v3 fallback dict shape passes normalizer untouched."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            {"symbol": "SPY", "historical": [{"date": "2026-04-29", "close": 501.0}]},
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+    def test_legacy_v3_dict_passthrough(self, monkeypatch):
+        """A dict-shaped stable response passes the normalizer untouched."""
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200, {"symbol": "SPY", "historical": [{"date": "2026-04-29", "close": 501.0}]}
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=1)
         assert result is not None
         assert result["historical"][0]["close"] == 501.0
 
-    @patch("fmp_client.requests.Session")
-    def test_legacy_historicalStockList_still_works(self, mock_session_class):
+    def test_legacy_historicalStockList_still_works(self, monkeypatch):
         """historicalStockList batch shape still handled by existing branch."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            {
-                "historicalStockList": [
-                    {"symbol": "SPY", "historical": [{"date": "2026-04-29", "close": 501.0}]},
-                    {"symbol": "QQQ", "historical": [{"date": "2026-04-29", "close": 400.0}]},
-                ]
-            },
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+
+        def get_response(url, params=None, timeout=None):
+            return _mock_response(
+                200,
+                {
+                    "historicalStockList": [
+                        {"symbol": "SPY", "historical": [{"date": "2026-04-29", "close": 501.0}]},
+                        {"symbol": "QQQ", "historical": [{"date": "2026-04-29", "close": 400.0}]},
+                    ]
+                },
+            )
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=1)
         assert result is not None
         assert result["symbol"] == "SPY"
         assert result["historical"][0]["close"] == 501.0
 
-    @patch("fmp_client.requests.Session")
-    def test_url_uses_eod_endpoint(self, mock_session_class):
-        """Regression: stable URL must be /historical-price-eod/full, not /historical-price-full."""
-        mock_session = MagicMock()
-        mock_session.get.return_value = self._mock_response(
-            200,
-            [{"symbol": "SPY", "date": "2026-04-29", "close": 1.0}],
-        )
-        mock_session_class.return_value = mock_session
-        client = self._make_client(mock_session)
+    def test_url_uses_eod_endpoint(self, monkeypatch):
+        """Regression: stable URL must be /historical-price-eod/full; the
+        client passes `timeseries` through unchanged and fmp_compat's own
+        `_prepare_params_for_url` converts it to from/to before the wire call."""
+        calls = []
+
+        def get_response(url, params=None, timeout=None):
+            calls.append((url, dict(params or {})))
+            return _mock_response(200, [{"symbol": "SPY", "date": "2026-04-29", "close": 1.0}])
+
+        _drive_real_transport(monkeypatch, get_response)
+        client = self._make_client()
 
         client.get_historical_prices("SPY", days=1)
-        # First call should hit the new EOD URL with from/to params (not timeseries)
-        first_call = mock_session.get.call_args_list[0]
-        url = first_call[0][0]
-        params = first_call[1]["params"]
+        assert len(calls) == 1
+        url, params = calls[0]
         assert "historical-price-eod/full" in url
         assert "historical-price-full" not in url.replace("historical-price-eod/full", "")
         assert params.get("symbol") == "SPY"

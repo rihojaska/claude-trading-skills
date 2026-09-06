@@ -22,12 +22,10 @@ GENERATED_SKILLS = {
     "macro-regime-detector",
     "market-top-detector",
 }
-NO_COMPAT_SKILLS = {
-    "ftd-detector",
-    "canslim-screener",
-    "macro-regime-detector",
-    "market-top-detector",
-}
+# Every generated client now delegates its FMP transport to
+# fmp_compat.fmp_get_typed (or the bare fmp_get for the yfinance-fallback
+# specials) — no skill vendors its own _fmp_compat.py copy any more
+# (S-FMPCLIENT-3, 2026-09-06).
 
 
 @pytest.fixture(scope="module")
@@ -49,7 +47,7 @@ def test_registry_has_expected_skills(gen):
     assert set(skills) == GENERATED_SKILLS
     for cfg in skills.values():
         assert cfg.budget == (cfg.family == "B")
-        assert cfg.has_compat == (cfg.skill not in NO_COMPAT_SKILLS)
+        assert cfg.has_compat is False
         assert bool(cfg.standalone_template) == (cfg.family == "special")
 
 
@@ -117,23 +115,14 @@ def test_us_exchanges_only_for_earnings(gen):
     assert "US_EXCHANGES" not in gen.render_fmp_client(skills["pead-screener"])
 
 
-def test_compat_template_matches_vendored(gen):
-    # The byte-match invariant: the canonical compat == each skill's vendored copy.
-    compat = gen.render_compat()
+def test_no_fmp_compat_vendored_anywhere(gen):
+    # No skill vendors its own _fmp_compat.py copy any more — every generated
+    # client imports the repo-root fmp_compat module directly (guarded for a
+    # standalone .skill install that lacks it).
     for cfg in _skills(gen).values():
-        if not cfg.has_compat:
-            continue  # ftd-detector vendors no _fmp_compat.py
-        vendored = (REPO_ROOT / "skills" / cfg.skill / "scripts" / "_fmp_compat.py").read_text(
-            encoding="utf-8"
-        )
-        assert vendored == compat
-
-
-def test_no_compat_file_for_no_compat_skills(gen):
-    skills = _skills(gen)
-    assert {name for name, cfg in skills.items() if not cfg.has_compat} == NO_COMPAT_SKILLS
-    for skill in NO_COMPAT_SKILLS:
-        assert not (REPO_ROOT / "skills" / skill / "scripts" / "_fmp_compat.py").exists()
+        assert not (REPO_ROOT / "skills" / cfg.skill / "scripts" / "_fmp_compat.py").exists()
+    assert not (gen.SRC_DIR / "compat_v3_to_stable.py.tmpl").exists()
+    assert not hasattr(gen, "render_compat")
 
 
 def test_special_templates_preserve_public_surface(gen):

@@ -1,9 +1,10 @@
 """Regression tests for the FMP ``/stable`` endpoint migration (Issue #162).
 
-The v3→/stable sweep routed three ``fmp_client.py`` methods through
-``_fmp_compat.v3_to_stable()``, which passes unknown endpoint names through
-verbatim. Two endpoints were renamed between v3 and /stable, so the rewritten
-URLs 404; a third method dropped the ``mktCap`` alias its consumer still reads.
+Three ``fmp_client.py`` methods (``get_sp500_constituents``,
+``get_earnings_calendar``, ``get_company_profile``) build explicit ``/stable``
+URLs directly (S-FMPCLIENT-3, 2026-09-06 — the ``_fmp_compat.v3_to_stable()``
+shim these used to route through is gone; every generated client now
+delegates its FMP transport to the repo-root ``fmp_compat`` module instead).
 These tests pin the corrected behaviour:
 
 - ``/stable/sp500-constituent`` (not ``sp500_constituent``)
@@ -23,10 +24,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-import _fmp_compat  # noqa: E402
 from fmp_client import FMPClient  # noqa: E402
-
-_V3 = "https://financialmodelingprep.com/api/v3"
 
 
 def _call_url_params(mock: MagicMock) -> tuple[str, dict | None]:
@@ -39,25 +37,6 @@ def _call_url_params(mock: MagicMock) -> tuple[str, dict | None]:
     else:
         params = call.kwargs.get("params")
     return url, params
-
-
-# --- v3_to_stable URL mapping (pure function) ---------------------------------
-
-
-def test_v3_to_stable_sp500_constituent_uses_hyphen() -> None:
-    url, params = _fmp_compat.v3_to_stable(f"{_V3}/sp500_constituent")
-    assert url == "https://financialmodelingprep.com/stable/sp500-constituent"
-    assert "sp500_constituent" not in url
-    assert params == {}
-
-
-def test_v3_to_stable_earning_calendar_uses_hyphen_and_preserves_params() -> None:
-    url, params = _fmp_compat.v3_to_stable(
-        f"{_V3}/earning_calendar", {"from": "2026-05-20", "to": "2026-06-15"}
-    )
-    assert url == "https://financialmodelingprep.com/stable/earnings-calendar"
-    assert "earning_calendar" not in url
-    assert params == {"from": "2026-05-20", "to": "2026-06-15"}
 
 
 # --- Client methods build the corrected URLs ----------------------------------
