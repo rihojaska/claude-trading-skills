@@ -1,10 +1,24 @@
-"""Tests for fmp_price_adapter.py — mock HTTP responses."""
+"""Tests for fmp_price_adapter.py — mock HTTP responses.
+
+Exercises the standalone (no-fmp_compat) transport throughout this file:
+fmp_price_adapter prefers `fmp_compat.fmp_get`, and these tests inject canned
+responses at `urllib.request.urlopen`, which is the direct /stable path used
+when the repo-root shim is not importable. Pinning `fmp_get = None` keeps
+that injection honest instead of silently reaching the network. The fmp_get
+path is covered at the real transport seam in
+scripts/tests/test_v3_rungs_gone_0901_016.py.
+"""
 
 import json
 from unittest.mock import MagicMock, patch
 
 import fmp_price_adapter
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _direct_stable_transport(monkeypatch):
+    monkeypatch.setattr(fmp_price_adapter, "fmp_get", None, raising=False)
 
 
 def test_get_daily_closes_parses_response():

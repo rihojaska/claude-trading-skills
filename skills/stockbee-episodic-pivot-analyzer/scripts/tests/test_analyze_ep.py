@@ -2,9 +2,12 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import analyze_ep  # noqa: E402
 from analyze_ep import (  # noqa: E402
     FMPClient,
     analyze_candidate,
@@ -15,6 +18,19 @@ from analyze_ep import (  # noqa: E402
     price_stats_from_bars,
     sort_results,
 )
+
+
+@pytest.fixture(autouse=True)
+def _direct_stable_transport(monkeypatch):
+    """Exercise the standalone (no-fmp_compat) transport throughout this file.
+
+    analyze_ep prefers `fmp_compat.fmp_get`; the FakeSession injection below is
+    the direct /stable path used when the repo-root shim is not importable.
+    Pinning `fmp_get = None` keeps that injection honest instead of silently
+    reaching the network. The fmp_get path is covered at the real transport
+    seam in scripts/tests/test_v3_rungs_gone_0901_016.py.
+    """
+    monkeypatch.setattr(analyze_ep, "fmp_get", None, raising=False)
 
 
 def make_bars(symbol_move=True):

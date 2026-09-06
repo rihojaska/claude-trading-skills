@@ -52,6 +52,21 @@ import requests
 from scipy import stats
 from statsmodels_support import require_statsmodels
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
 # =============================================================================
 # FMP API Functions
 # =============================================================================
@@ -72,36 +87,31 @@ def fetch_sector_stocks(sector, api_key, min_market_cap=2_000_000_000):
     """Fetch stocks in a sector from FMP API"""
     print(f"\n[1/5] Fetching {sector} sector stocks from FMP API...")
 
-    # Stock screener: stable /company-screener, with a v3 /stock-screener
-    # fallback for legacy keys. Both accept the same query params and return
-    # the same fields (symbol, companyName, marketCap, sector,
-    # exchangeShortName, isActivelyTrading).
+    # /stable/company-screener only. FMP retired v3 for keys issued after
+    # 2025-08-31, and a v3 URL requested through fmp_compat is rewritten
+    # straight back to the equivalent /stable endpoint — so a second "v3
+    # rung" here was never a distinct upstream (WPP-20260831-004 /
+    # WPP-20260901-016).
+    url = "https://financialmodelingprep.com/stable/company-screener"
     params = {
         "sector": sector,
         "marketCapMoreThan": min_market_cap,
         "limit": 1000,
     }
-    endpoints = [
-        "https://financialmodelingprep.com/stable/company-screener",
-        "https://financialmodelingprep.com/api/v3/stock-screener",
-    ]
 
     data = None
-    for url in endpoints:
+    if fmp_get is not None:
+        with key_override(api_key):
+            data = fmp_get(url, params=params, timeout=30)
+    else:
         try:
             response = requests.get(url, params=params, headers={"apikey": api_key}, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
         except requests.exceptions.RequestException as e:
             print(f"  WARNING: screener request failed ({url}): {e}")
-            continue
-        if response.status_code != 200:
-            continue
-        try:
-            payload = response.json()
         except ValueError:
-            continue
-        if payload:
-            data = payload
-            break
+            data = None
 
     if not data:
         print(f"ERROR: No stocks found in {sector} sector with market cap > ${min_market_cap:,}")
@@ -125,50 +135,37 @@ def fetch_sector_stocks(sector, api_key, min_market_cap=2_000_000_000):
     return stocks
 
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
-_FMP_HIST_ENDPOINTS = [
-    (
-        "https://financialmodelingprep.com/stable/historical-price-eod/full",
-        True,
-    ),  # stable: symbol in query
-    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),  # v3: symbol in path
-]
-_endpoint_failures: dict[str, int] = {}
-_BREAKER_THRESHOLD = 3
+# /stable/historical-price-eod/full only (see fetch_sector_stocks note above
+# on why the v3 rung was never a distinct upstream).
+_FMP_HIST_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
 
 
 def _fetch_raw_historical(symbol, api_key, params=None):
-    """Try stable endpoint first, fall back to v3. Returns dict or None."""
-    for base_url, is_stable in _FMP_HIST_ENDPOINTS:
-        if _endpoint_failures.get(base_url, 0) >= _BREAKER_THRESHOLD:
-            continue
-        if is_stable:
-            url = base_url
-            req_params = dict(params or {})
-            req_params["symbol"] = symbol
-        else:
-            url = f"{base_url}/{symbol}"
-            req_params = dict(params or {})
-        try:
-            resp = requests.get(url, headers={"apikey": api_key}, params=req_params, timeout=30)
-            if resp.status_code != 200:
-                _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
-                continue
-            data = resp.json()
-            if isinstance(data, dict) and "historical" in data:
-                _endpoint_failures[base_url] = 0
-                return data
-            if isinstance(data, dict) and "historicalStockList" in data:
-                for entry in data["historicalStockList"]:
-                    if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
-                        _endpoint_failures[base_url] = 0
-                        return {
-                            "symbol": entry["symbol"],
-                            "historical": entry.get("historical", []),
-                        }
-            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
-        except requests.exceptions.RequestException:
-            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+    """Fetch historical EOD data for `symbol`. Returns dict or None."""
+    req_params = dict(params or {})
+    req_params["symbol"] = symbol
+    if fmp_get is not None:
+        with key_override(api_key):
+            data = fmp_get(_FMP_HIST_URL, params=req_params, timeout=30)
+        if isinstance(data, dict) and "historical" in data:
+            return data
+        return None
+    try:
+        resp = requests.get(
+            _FMP_HIST_URL, headers={"apikey": api_key}, params=req_params, timeout=30
+        )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except requests.exceptions.RequestException:
+        return None
+    if isinstance(data, dict) and "historical" in data:
+        return data
+    if isinstance(data, list):
+        # Raw /stable flat-list shape.
+        rows = [row for row in data if isinstance(row, dict)]
+        if rows:
+            return {"symbol": symbol, "historical": rows}
     return None
 
 

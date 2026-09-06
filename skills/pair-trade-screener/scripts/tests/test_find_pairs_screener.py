@@ -1,14 +1,25 @@
-"""FMP /stable migration: sector screener uses /stable/company-screener.
+"""FMP /stable migration: sector screener uses /stable/company-screener only.
 
-fetch_sector_stocks() used v3 /stock-screener (403 for keys issued after
-2025-08-31). It now calls /stable/company-screener first with a v3 fallback;
-both take the same params and field names, so extraction is unchanged.
+fetch_sector_stocks() used to try v3 /stock-screener as a fallback when the
+stable call failed. FMP retired v3 for keys issued after 2025-08-31, and a v3
+URL requested through fmp_compat is rewritten straight back to the identical
+/stable endpoint, so that fallback was never a distinct upstream
+(WPP-20260831-004 / WPP-20260901-016) — it has been deleted. These tests pin
+`fmp_get = None` to exercise the standalone (no-fmp_compat) transport
+directly; the fmp_get path is covered at the real transport seam in
+scripts/tests/test_v3_rungs_gone_0901_016.py.
 """
 
 from unittest.mock import MagicMock, patch
 
 import find_pairs  # noqa: E402
+import pytest
 import statsmodels  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _direct_stable_transport(monkeypatch):
+    monkeypatch.setattr(find_pairs, "fmp_get", None, raising=False)
 
 
 def _resp(status_code, payload):
@@ -47,20 +58,17 @@ def test_uses_stable_company_screener_first(mock_get):
 
 
 @patch("find_pairs.requests.get")
-def test_falls_back_to_v3_stock_screener(mock_get):
-    def fake_get(url, params=None, headers=None, timeout=None):
-        if url.endswith("/stable/company-screener"):
-            return _resp(403, {})  # legacy/stable failure -> fallback
-        return _resp(
-            200,
-            [{"symbol": "AAPL", "companyName": "Apple", "isActivelyTrading": True}],
-        )
+def test_stable_failure_raises_with_no_second_request(mock_get):
+    """A failed stable call makes no second (v3) request and exits loudly."""
+    mock_get.return_value = _resp(403, {})
 
-    mock_get.side_effect = fake_get
-    stocks = find_pairs.fetch_sector_stocks("Technology", "key")
-    assert stocks[0]["symbol"] == "AAPL"
-    urls = [c[0][0] for c in mock_get.call_args_list]
-    assert any(u.endswith("/api/v3/stock-screener") for u in urls)
+    with pytest.raises(SystemExit):
+        find_pairs.fetch_sector_stocks("Technology", "key")
+
+    assert mock_get.call_count == 1
+    url = mock_get.call_args_list[0][0][0]
+    assert url.endswith("/stable/company-screener")
+    assert "api/v3" not in url
 
 
 @patch("find_pairs.requests.get")

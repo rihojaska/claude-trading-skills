@@ -27,12 +27,28 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 try:
     import requests
 except ImportError:  # pragma: no cover - only hit in stripped Python envs
     requests = None
+
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
 
 
 CATALYST_ALIASES = {
@@ -148,16 +164,16 @@ class PriceStats:
 
 
 class FMPClient:
-    """Minimal stable-first FMP OHLCV/profile client for optional enrichment."""
+    """Minimal /stable-only FMP OHLCV/profile client for optional enrichment.
 
-    HIST_URLS = [
-        "https://financialmodelingprep.com/stable/historical-price-eod/full",
-        "https://financialmodelingprep.com/api/v3/historical-price-full",
-    ]
-    PROFILE_URLS = [
-        "https://financialmodelingprep.com/stable/profile",
-        "https://financialmodelingprep.com/api/v3/profile",
-    ]
+    FMP retired v3 for keys issued after 2025-08-31, and a v3 URL requested
+    through fmp_compat is rewritten straight back to the equivalent /stable
+    endpoint — so a v3 rung here was never a distinct upstream
+    (WPP-20260831-004 / WPP-20260901-016).
+    """
+
+    HIST_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
+    PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
 
     def __init__(self, api_key: str | None, max_api_calls: int = 200):
         if requests is None:
@@ -174,6 +190,12 @@ class FMPClient:
         if self.api_calls >= self.max_api_calls:
             return None
         self.api_calls += 1
+        if fmp_get is not None:
+            try:
+                with key_override(self.api_key):
+                    return fmp_get(url, params=params, timeout=30)
+            finally:
+                time.sleep(0.3)
         try:
             resp = self.session.get(url, params=params, timeout=30)
             time.sleep(0.3)
@@ -185,25 +207,20 @@ class FMPClient:
 
     def get_historical_prices(self, symbol: str, days: int = 90) -> list[dict[str, Any]]:
         today = date.today()
-        params_stable = {
+        params = {
             "symbol": symbol,
             "from": (today - timedelta(days=days * 2 + 10)).isoformat(),
             "to": today.isoformat(),
         }
-        data = self._get(self.HIST_URLS[0], params_stable)
+        data = self._get(self.HIST_URL, params)
         if isinstance(data, list) and data:
             return normalize_bars(data)[-days:]
-
-        data = self._get(f"{self.HIST_URLS[1]}/{symbol}", {"timeseries": days})
         if isinstance(data, dict) and isinstance(data.get("historical"), list):
             return normalize_bars(data["historical"])[-days:]
         return []
 
     def get_profile(self, symbol: str) -> dict[str, Any]:
-        data = self._get(self.PROFILE_URLS[0], {"symbol": symbol})
-        if isinstance(data, list) and data:
-            return data[0]
-        data = self._get(f"{self.PROFILE_URLS[1]}/{symbol}", {})
+        data = self._get(self.PROFILE_URL, {"symbol": symbol})
         if isinstance(data, list) and data:
             return data[0]
         return {}

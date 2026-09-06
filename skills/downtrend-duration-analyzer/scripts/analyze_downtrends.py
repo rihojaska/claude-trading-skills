@@ -20,6 +20,21 @@ import numpy as np
 import pandas as pd
 import requests
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
 # Market cap tier thresholds (in billions USD)
 MARKET_CAP_TIERS = {
     "Mega": 200_000_000_000,  # >= $200B
@@ -75,87 +90,84 @@ def get_market_cap_tier(market_cap: float | None) -> str:
 def fetch_stock_list(api_key: str, sector: str | None = None) -> list[dict]:
     """Fetch list of stocks, optionally filtered by sector.
 
-    Uses the /stable/company-screener endpoint (the v3 /stock-screener it
-    replaced 403s for keys issued after 2025-08-31), with a v3 fallback for
-    legacy keys. Both take the same params and return the same fields
-    (symbol, sector, marketCap, ...).
+    Uses the /stable/company-screener endpoint only. FMP retired v3 for keys
+    issued after 2025-08-31, and a v3 URL requested through fmp_compat is
+    rewritten straight back to the equivalent /stable endpoint — so a second
+    "v3 rung" here was never a distinct upstream (WPP-20260831-004 /
+    WPP-20260901-016).
     """
+    url = "https://financialmodelingprep.com/stable/company-screener"
     params: dict[str, Any] = {
-        "apikey": api_key,
         "isActivelyTrading": "true",
         "limit": 500,
     }
     if sector:
         params["sector"] = sector
-    endpoints = [
-        "https://financialmodelingprep.com/stable/company-screener",
-        "https://financialmodelingprep.com/api/v3/stock-screener",
-    ]
-    for url in endpoints:
-        try:
-            response = requests.get(url, params=params, timeout=30)
-        except requests.RequestException as e:
-            print(f"Error fetching stock list ({url}): {e}", file=sys.stderr)
-            continue
-        if response.status_code != 200:
-            continue
-        try:
-            return response.json()
-        except ValueError:
-            continue
-    print("Error fetching stock list: all screener endpoints failed", file=sys.stderr)
-    return []
+
+    if fmp_get is not None:
+        with key_override(api_key):
+            data = fmp_get(url, params=params, timeout=30)
+        if data is not None:
+            return data
+        print("Error fetching stock list: screener request failed", file=sys.stderr)
+        return []
+
+    params["apikey"] = api_key
+    try:
+        response = requests.get(url, params=params, timeout=30)
+    except requests.RequestException as e:
+        print(f"Error fetching stock list ({url}): {e}", file=sys.stderr)
+        return []
+    if response.status_code != 200:
+        print("Error fetching stock list: screener request failed", file=sys.stderr)
+        return []
+    try:
+        return response.json()
+    except ValueError:
+        print("Error fetching stock list: screener request failed", file=sys.stderr)
+        return []
 
 
-# --- FMP endpoint fallback: stable (new users) -> v3 (legacy users) ---
-_FMP_HIST_ENDPOINTS = [
-    ("https://financialmodelingprep.com/stable/historical-price-eod/full", True),
-    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
-]
-_endpoint_failures: dict[str, int] = {}
-_BREAKER_THRESHOLD = 3
+# /stable/historical-price-eod/full only (see fetch_stock_list note above on
+# why the v3 rung was never a distinct upstream).
+_FMP_HIST_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
 
 
 def fetch_historical_prices(
     api_key: str, symbol: str, from_date: str, to_date: str
 ) -> pd.DataFrame:
     """Fetch historical daily prices for a symbol."""
-    for base_url, is_stable in _FMP_HIST_ENDPOINTS:
-        if _endpoint_failures.get(base_url, 0) >= _BREAKER_THRESHOLD:
-            continue
-        if is_stable:
-            url = base_url
-            params = {"symbol": symbol, "from": from_date, "to": to_date, "apikey": api_key}
-        else:
-            url = f"{base_url}/{symbol}"
-            params = {"from": from_date, "to": to_date, "apikey": api_key}
+    params = {"symbol": symbol, "from": from_date, "to": to_date}
+
+    historical = None
+    if fmp_get is not None:
+        with key_override(api_key):
+            data = fmp_get(_FMP_HIST_URL, params=params, timeout=30)
+        if isinstance(data, dict) and "historical" in data:
+            historical = data["historical"]
+    else:
+        params = dict(params)
+        params["apikey"] = api_key
         try:
-            response = requests.get(url, params=params, timeout=30)
-            if response.status_code != 200:
-                _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
-                continue
-            data = response.json()
-            historical = None
-            if isinstance(data, dict) and "historical" in data:
-                historical = data["historical"]
-            elif isinstance(data, dict) and "historicalStockList" in data:
-                for entry in data["historicalStockList"]:
-                    if entry.get("symbol", "").replace("-", ".") == symbol.replace("-", "."):
-                        historical = entry.get("historical", [])
-                        break
-            if historical is not None:
-                _endpoint_failures[base_url] = 0
-                df = pd.DataFrame(historical)
-                if df.empty:
-                    return df
-                df["date"] = pd.to_datetime(df["date"])
-                df = df.sort_values("date").reset_index(drop=True)
-                return df[["date", "open", "high", "low", "close", "volume"]]
-            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
+            response = requests.get(_FMP_HIST_URL, params=params, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                if isinstance(data, dict) and "historical" in data:
+                    historical = data["historical"]
+                elif isinstance(data, list):
+                    historical = [row for row in data if isinstance(row, dict)]
         except requests.RequestException:
-            _endpoint_failures[base_url] = _endpoint_failures.get(base_url, 0) + 1
-            continue
-    print(f"Error fetching prices for {symbol}: all endpoints failed", file=sys.stderr)
+            historical = None
+
+    if historical is not None:
+        df = pd.DataFrame(historical)
+        if df.empty:
+            return df
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        return df[["date", "open", "high", "low", "close", "volume"]]
+
+    print(f"Error fetching prices for {symbol}: request failed", file=sys.stderr)
     return pd.DataFrame()
 
 

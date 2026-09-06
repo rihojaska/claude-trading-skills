@@ -29,6 +29,21 @@ try:  # Optional live-data path.
 except ImportError:  # pragma: no cover - optional dependency
     requests = None
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
 SCHEMA_VERSION = "1.0"
 SKILL_NAME = "stockbee-20pct-study"
 DEFAULT_STATE_FILE = "state/stockbee/20pct_study_events.jsonl"
@@ -59,10 +74,15 @@ class ApiCallBudgetExceeded(Exception):
 
 
 class FMPClient:
-    """Small FMP client for optional universe and OHLCV retrieval."""
+    """Small /stable-only FMP client for optional universe and OHLCV retrieval.
+
+    FMP retired v3 for keys issued after 2025-08-31, and a v3 URL requested
+    through fmp_compat is rewritten straight back to the equivalent /stable
+    endpoint — so a v3 rung here was never a distinct upstream
+    (WPP-20260831-004 / WPP-20260901-016).
+    """
 
     STABLE_URL = "https://financialmodelingprep.com/stable"
-    V3_URL = "https://financialmodelingprep.com/api/v3"
     RATE_LIMIT_DELAY = 0.30
 
     def __init__(self, api_key: str | None = None, max_api_calls: int = 500):
@@ -83,10 +103,20 @@ class FMPClient:
                 f"API budget exhausted: {self.api_calls_made}/{self.max_api_calls} calls used"
             )
         params = dict(params or {})
-        params.setdefault("apikey", self.api_key)
         elapsed = time.time() - self.last_call_time
         if elapsed < self.RATE_LIMIT_DELAY:
             time.sleep(self.RATE_LIMIT_DELAY - elapsed)
+
+        if fmp_get is not None:
+            with key_override(self.api_key):
+                data = fmp_get(url, params=params, timeout=30)
+            self.last_call_time = time.time()
+            self.api_calls_made += 1
+            if data is None and not quiet:
+                print("ERROR: FMP request failed", file=sys.stderr)
+            return data
+
+        params.setdefault("apikey", self.api_key)
         try:
             response = self.session.get(url, params=params, timeout=30)
             self.last_call_time = time.time()
@@ -103,12 +133,6 @@ class FMPClient:
                 print(f"ERROR: FMP request exception: {exc}", file=sys.stderr)
         return None
 
-    def _stable_then_v3(self, stable_url: str, v3_url: str, params: dict[str, Any]) -> Any:
-        stable = self._get(stable_url, params, quiet=True)
-        if stable not in (None, [], {}):
-            return stable
-        return self._get(v3_url, params, quiet=False)
-
     def get_stock_list(self, limit: int | None = None) -> list[str]:
         cache_key = f"stock_list:{limit}"
         if cache_key in self.cache:
@@ -118,11 +142,7 @@ class FMPClient:
             "priceMoreThan": 0,
             "limit": max(int(limit or 10000), 10000),
         }
-        payload = self._stable_then_v3(
-            f"{self.STABLE_URL}/company-screener",
-            f"{self.V3_URL}/stock-screener",
-            params,
-        )
+        payload = self._get(f"{self.STABLE_URL}/company-screener", params)
         symbols: list[str] = []
         if isinstance(payload, list):
             for row in payload:
@@ -160,13 +180,8 @@ class FMPClient:
             "from": (today - timedelta(days=days * 2 + 20)).isoformat(),
             "to": today.isoformat(),
         }
-        payload = self._get(f"{self.STABLE_URL}/historical-price-eod/full", params, quiet=True)
+        payload = self._get(f"{self.STABLE_URL}/historical-price-eod/full", params)
         bars = normalize_price_bars(payload, symbol=symbol)
-        if not bars:
-            payload = self._get(
-                f"{self.V3_URL}/historical-price-full/{symbol}", {"timeseries": days}
-            )
-            bars = normalize_price_bars(payload, symbol=symbol)
         result = [bar_to_dict(bar) for bar in bars[-days:]]
         self.cache[cache_key] = result
         return result

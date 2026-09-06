@@ -12,7 +12,9 @@ Selects representative stocks for market themes using a fallback chain:
 import csv
 import io
 import logging
+import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -24,6 +26,21 @@ try:
     from finvizfinance.screener.overview import Overview
 except ImportError:
     Overview = None  # type: ignore[assignment,misc]
+
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -457,32 +474,44 @@ class RepresentativeStockSelector:
             return []
 
     def _fetch_etf_holdings(self, etf_symbol: str, limit: int) -> list[dict]:
-        """Fetch top ETF holdings via FMP API."""
-        if requests is None or not self._fmp_api_key:
+        """Fetch top ETF holdings via FMP /stable/etf/holdings.
+
+        FMP retired v3 for keys issued after 2025-08-31, and a v3 URL
+        requested through fmp_compat is rewritten straight back to the
+        equivalent /stable endpoint — so a v3 rung here was never a distinct
+        upstream (WPP-20260831-004 / WPP-20260901-016). Returns a list of
+        holdings with `asset` (ticker) and `marketValue`.
+        """
+        if not self._fmp_api_key:
+            return []
+        if fmp_get is None and requests is None:
             return []
 
         self._rate_limit()
         self._source_states["fmp"].total_queries += 1
 
-        # stable: /etf/holdings?symbol= ; v3 fallback (legacy keys): /etf-holder/{symbol}.
-        # Both return a list of holdings with `asset` (ticker) and `marketValue`.
-        endpoints = [
-            ("https://financialmodelingprep.com/stable/etf/holdings", {"symbol": etf_symbol}),
-            (f"https://financialmodelingprep.com/api/v3/etf-holder/{etf_symbol}", None),
-        ]
-
         try:
             data = None
-            for url, params in endpoints:
-                resp = requests.get(
-                    url, params=params, headers={"apikey": self._fmp_api_key}, timeout=15
-                )
-                if resp.status_code != 200:
-                    continue
-                payload = resp.json()
+            if fmp_get is not None:
+                with key_override(self._fmp_api_key):
+                    payload = fmp_get(
+                        "https://financialmodelingprep.com/stable/etf/holdings",
+                        {"symbol": etf_symbol},
+                        timeout=15,
+                    )
                 if isinstance(payload, list) and payload:
                     data = payload
-                    break
+            else:
+                resp = requests.get(
+                    "https://financialmodelingprep.com/stable/etf/holdings",
+                    params={"symbol": etf_symbol},
+                    headers={"apikey": self._fmp_api_key},
+                    timeout=15,
+                )
+                if resp.status_code == 200:
+                    payload = resp.json()
+                    if isinstance(payload, list) and payload:
+                        data = payload
 
             if not data:
                 self._record_failure("fmp")

@@ -6,11 +6,18 @@ Keys issued after 2025-08-31 lose v3 access (403). Fixes:
 - Historical uses /stable/historical-price-eod/full (the prior stable URL,
   historical-price-full, 404s) with timeseries->from/to and flat-list
   normalization back to the v3 {"symbol","historical"} shape.
-- ETF holdings: /api/v3/etf-holder/{sym} -> /stable/etf/holdings?symbol=
-  (+ v3 fallback); both expose `asset` and `marketValue`.
+- ETF holdings: /stable/etf/holdings?symbol= only. A v3 URL requested
+  through fmp_compat is rewritten straight back to the identical /stable
+  endpoint, so a "v3 fallback" was never a distinct upstream
+  (WPP-20260831-004 / WPP-20260901-016) — TestEtfHoldings below pins
+  `fmp_get = None` to exercise the standalone transport directly; the
+  fmp_get path is covered at the real transport seam in
+  scripts/tests/test_v3_rungs_gone_0901_016.py.
 """
 
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 import representative_stock_selector as rss
 from etf_scanner import ETFScanner, _normalize_eod_flat_list, _stable_hist_url
@@ -63,6 +70,19 @@ class TestDeBatch:
 
 
 class TestEtfHoldings:
+    @pytest.fixture(autouse=True)
+    def _direct_stable_transport(self, monkeypatch):
+        """Exercise the standalone (no-fmp_compat) transport in this class.
+
+        representative_stock_selector prefers `fmp_compat.fmp_get`; the tests
+        below inject canned responses at `requests.get`, which is the direct
+        /stable path used when the repo-root shim is not importable. Pinning
+        `fmp_get = None` keeps that injection honest instead of silently
+        reaching the network. The fmp_get path is covered at the real
+        transport seam in scripts/tests/test_v3_rungs_gone_0901_016.py.
+        """
+        monkeypatch.setattr(rss, "fmp_get", None, raising=False)
+
     def _resp(self, status, payload):
         r = MagicMock()
         r.status_code = status
@@ -81,18 +101,17 @@ class TestEtfHoldings:
         assert mock_requests.get.call_args[0][0].endswith("/stable/etf/holdings")
         assert mock_requests.get.call_args[1]["params"] == {"symbol": "SPY"}
 
-    def test_falls_back_to_v3_etf_holder(self):
+    def test_stable_failure_returns_empty_with_no_second_request(self):
+        """A failed stable call makes no second (v3) request."""
         sel = rss.RepresentativeStockSelector(fmp_api_key="k")
         sel._rate_limit = lambda: None
 
-        def fake_get(url, params=None, headers=None, timeout=None):
-            if "/stable/etf/holdings" in url:
-                return self._resp(403, {})
-            return self._resp(200, [{"asset": "AAPL", "marketValue": 5}])
-
         with patch.object(rss, "requests") as mock_requests:
-            mock_requests.get.side_effect = fake_get
+            mock_requests.get.return_value = self._resp(403, {})
             holds = sel._fetch_etf_holdings("XLK", limit=5)
-        assert holds[0]["symbol"] == "AAPL"
-        urls = [c[0][0] for c in mock_requests.get.call_args_list]
-        assert any(u.endswith("/api/v3/etf-holder/XLK") for u in urls)
+
+        assert holds == []
+        assert mock_requests.get.call_count == 1
+        url = mock_requests.get.call_args[0][0]
+        assert url.endswith("/stable/etf/holdings")
+        assert "api/v3" not in url

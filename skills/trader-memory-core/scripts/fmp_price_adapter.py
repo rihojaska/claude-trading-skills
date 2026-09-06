@@ -9,15 +9,34 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import urllib.error
+import urllib.parse
 import urllib.request
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_FMP_HIST_ENDPOINTS = [
-    ("https://financialmodelingprep.com/stable/historical-price-eod/full", True),
-    ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
-]
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
+# /stable/historical-price-eod/full only. FMP retired v3 for keys issued
+# after 2025-08-31, and a v3 URL requested through fmp_compat is rewritten
+# straight back to the equivalent /stable endpoint — so a second "v3 rung"
+# here was never a distinct upstream (WPP-20260831-004 / WPP-20260901-016).
+_FMP_HIST_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
 
 
 class FMPPriceAdapter:
@@ -43,46 +62,44 @@ class FMPPriceAdapter:
             urllib.error.URLError: On network/API errors (only if all endpoints fail).
             ValueError: On invalid response.
         """
-        last_error = None
-        for base_url, is_stable in _FMP_HIST_ENDPOINTS:
-            if is_stable:
-                url = f"{base_url}?symbol={ticker}&from={from_date}&to={to_date}"
-            else:
-                url = f"{base_url}/{ticker}?from={from_date}&to={to_date}"
-            req = urllib.request.Request(url, headers={"apikey": self.api_key})
+        params = {"symbol": ticker, "from": from_date, "to": to_date}
 
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    data = json.loads(resp.read().decode())
-            except urllib.error.HTTPError as e:
-                last_error = e
-                logger.debug("FMP endpoint %s failed for %s: %s", base_url, ticker, e)
-                continue
+        if fmp_get is not None:
+            with key_override(self.api_key):
+                data = fmp_get(_FMP_HIST_URL, params=params, timeout=30)
+            historical = self._extract_historical(data, ticker) if data is not None else []
+            return self._to_closes(historical, ticker, from_date, to_date)
 
-            historical = self._extract_historical(data, ticker)
-            if not historical:
-                continue
+        url = f"{_FMP_HIST_URL}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"apikey": self.api_key})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            logger.error("FMP API error for %s: %s", ticker, e)
+            raise
 
-            # FMP returns newest first; reverse to oldest first.
-            # Stable EOD endpoint no longer exposes `adjClose`; fall back to `close`.
-            # Patched 2026-05-22 (stable shape).
-            result = [
-                {"date": item["date"], "close": item.get("adjClose") or item["close"]}
-                for item in reversed(historical)
-                if "date" in item and ("adjClose" in item or "close" in item)
-            ]
-            return result
+        historical = self._extract_historical(data, ticker)
+        return self._to_closes(historical, ticker, from_date, to_date)
 
-        if last_error:
-            logger.error("FMP API error for %s: %s", ticker, last_error)
-            raise last_error
-
-        logger.warning("No price data returned for %s (%s to %s)", ticker, from_date, to_date)
-        return []
+    def _to_closes(
+        self, historical: list[dict], ticker: str, from_date: str, to_date: str
+    ) -> list[dict]:
+        if not historical:
+            logger.warning("No price data returned for %s (%s to %s)", ticker, from_date, to_date)
+            return []
+        # FMP returns newest first; reverse to oldest first.
+        # Stable EOD endpoint no longer exposes `adjClose`; fall back to `close`.
+        # Patched 2026-05-22 (stable shape).
+        return [
+            {"date": item["date"], "close": item.get("adjClose") or item["close"]}
+            for item in reversed(historical)
+            if "date" in item and ("adjClose" in item or "close" in item)
+        ]
 
     @staticmethod
     def _extract_historical(data, ticker: str) -> list[dict]:
-        """Extract historical array from FMP response (stable list / v3 dict)."""
+        """Extract historical array from FMP response (stable list / dict)."""
         # New stable EOD endpoint returns a flat list of dicts directly.
         # Patched 2026-05-22 (stable shape).
         if isinstance(data, list):
@@ -94,11 +111,4 @@ class FMPPriceAdapter:
             ]
         if not isinstance(data, dict):
             return []
-        if "historical" in data:
-            return data["historical"]
-        if "historicalStockList" in data:
-            norm = ticker.replace("-", ".")
-            for entry in data["historicalStockList"]:
-                if entry.get("symbol", "").replace("-", ".") == norm:
-                    return entry.get("historical", [])
-        return []
+        return data.get("historical") or []

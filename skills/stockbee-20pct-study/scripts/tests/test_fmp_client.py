@@ -1,3 +1,15 @@
+"""Tests for run_20pct_study.FMPClient.
+
+FMPClient used to try v3 endpoints as a fallback when the /stable call
+failed. FMP retired v3 for keys issued after 2025-08-31, and a v3 URL
+requested through fmp_compat is rewritten straight back to the identical
+/stable endpoint, so that fallback was never a distinct upstream
+(WPP-20260831-004 / WPP-20260901-016) — it has been deleted. These tests pin
+`fmp_get = None` to exercise the standalone (no-fmp_compat) transport
+directly; the fmp_get path is covered at the real transport seam in
+scripts/tests/test_v3_rungs_gone_0901_016.py.
+"""
+
 import importlib.util
 import sys
 from pathlib import Path
@@ -10,6 +22,11 @@ spec = importlib.util.spec_from_file_location("run_20pct_study", SCRIPT)
 mod = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = mod
 spec.loader.exec_module(mod)
+
+
+@pytest.fixture(autouse=True)
+def _direct_stable_transport(monkeypatch):
+    monkeypatch.setattr(mod, "fmp_get", None, raising=False)
 
 
 def response(status, payload):
@@ -39,24 +56,21 @@ def test_fmp_universe_uses_stable_company_screener_first(monkeypatch):
     assert session.get.call_args_list[0][0][0].endswith("/stable/company-screener")
 
 
-def test_fmp_universe_falls_back_to_v3_stock_screener(monkeypatch):
+def test_fmp_universe_stable_failure_returns_empty_no_second_request(monkeypatch):
+    """A failed stable call makes no second (v3) request."""
     monkeypatch.setattr(mod.time, "sleep", lambda _: None)
     session = MagicMock()
-    session.get.side_effect = [
-        response(403, {}),
-        response(
-            200, [{"symbol": "MSFT", "exchangeShortName": "NASDAQ", "type": "stock", "price": 300}]
-        ),
-    ]
+    session.get.return_value = response(403, {})
     client = mod.FMPClient(api_key="test", max_api_calls=10)
     client.session = session
 
     symbols = client.get_stock_list(limit=10)
 
-    urls = [call[0][0] for call in session.get.call_args_list]
-    assert symbols == ["MSFT"]
-    assert urls[0].endswith("/stable/company-screener")
-    assert urls[1].endswith("/api/v3/stock-screener")
+    assert symbols == []
+    assert session.get.call_count == 1
+    url = session.get.call_args_list[0][0][0]
+    assert url.endswith("/stable/company-screener")
+    assert "api/v3" not in url
 
 
 def test_fmp_historical_accepts_stable_flat_list(monkeypatch):
@@ -94,36 +108,21 @@ def test_fmp_historical_accepts_stable_flat_list(monkeypatch):
     assert session.get.call_args_list[0][0][0].endswith("/stable/historical-price-eod/full")
 
 
-def test_fmp_historical_falls_back_to_v3_payload(monkeypatch):
+def test_fmp_historical_empty_stable_returns_empty_no_second_request(monkeypatch):
+    """An empty stable response makes no second (v3) request."""
     monkeypatch.setattr(mod.time, "sleep", lambda _: None)
     session = MagicMock()
-    session.get.side_effect = [
-        response(200, []),
-        response(
-            200,
-            {
-                "historical": [
-                    {
-                        "date": "2026-01-02",
-                        "open": 11,
-                        "high": 12,
-                        "low": 10,
-                        "close": 11.5,
-                        "volume": 2000,
-                    }
-                ]
-            },
-        ),
-    ]
+    session.get.return_value = response(200, [])
     client = mod.FMPClient(api_key="test", max_api_calls=10)
     client.session = session
 
     bars = client.get_historical_prices("AAPL", days=2)
 
-    urls = [call[0][0] for call in session.get.call_args_list]
-    assert bars[0]["date"] == "2026-01-02"
-    assert urls[0].endswith("/stable/historical-price-eod/full")
-    assert urls[1].endswith("/api/v3/historical-price-full/AAPL")
+    assert bars == []
+    assert session.get.call_count == 1
+    url = session.get.call_args_list[0][0][0]
+    assert url.endswith("/stable/historical-price-eod/full")
+    assert "api/v3" not in url
 
 
 def test_fmp_requires_key_for_live_path(monkeypatch):

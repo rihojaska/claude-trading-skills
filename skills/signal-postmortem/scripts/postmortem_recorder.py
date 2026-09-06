@@ -22,53 +22,71 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+SKILL_ROOT = Path(__file__).resolve().parents[3]
+if str(SKILL_ROOT) not in sys.path:
+    sys.path.insert(0, str(SKILL_ROOT))
+
+try:
+    from fmp_compat import fmp_get, key_override
+except ImportError:  # standalone .skill install without the repo-root module
+    fmp_get = None
+    key_override = None
+    print(
+        "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
+        "dual-key failover unavailable.",
+        file=sys.stderr,
+    )
+
 
 def get_fmp_api_key() -> Optional[str]:
     """Get FMP API key from environment or return None."""
     return os.environ.get("FMP_API_KEY")
 
 
+_FMP_HIST_URL = "https://financialmodelingprep.com/stable/historical-price-eod/full"
+
+
 def fetch_price_data(ticker: str, start_date: str, end_date: str, api_key: str) -> dict:
     """
-    Fetch historical price data from FMP API (stable with v3 fallback).
+    Fetch historical price data from FMP /stable/historical-price-eod/full.
+
+    FMP retired v3 for keys issued after 2025-08-31, and a v3 URL requested
+    through fmp_compat is rewritten straight back to the equivalent /stable
+    endpoint — so a v3 rung here was never a distinct upstream
+    (WPP-20260831-004 / WPP-20260901-016).
 
     Returns dict mapping date string to close price.
     """
+    params = {"symbol": ticker, "from": start_date, "to": end_date}
+
+    if fmp_get is not None:
+        with key_override(api_key):
+            data = fmp_get(_FMP_HIST_URL, params=params, timeout=30)
+        historical = data.get("historical") if isinstance(data, dict) else None
+        if historical is not None:
+            return {item["date"]: item["close"] for item in historical}
+        print(f"Warning: Failed to fetch price data for {ticker}: request failed", file=sys.stderr)
+        return {}
+
     if not HAS_REQUESTS:
         return {}
 
-    endpoints = [
-        ("https://financialmodelingprep.com/stable/historical-price-eod/full", True),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", False),
-    ]
-    for base_url, is_stable in endpoints:
-        try:
-            if is_stable:
-                url = base_url
-                params = {"symbol": ticker, "from": start_date, "to": end_date, "apikey": api_key}
-            else:
-                url = f"{base_url}/{ticker}"
-                params = {"from": start_date, "to": end_date, "apikey": api_key}
-            resp = requests.get(url, params=params, timeout=30)
-            if resp.status_code != 200:
-                continue
+    try:
+        params["apikey"] = api_key
+        resp = requests.get(_FMP_HIST_URL, params=params, timeout=30)
+        if resp.status_code == 200:
             data = resp.json()
             historical = None
             if isinstance(data, dict) and "historical" in data:
                 historical = data["historical"]
-            elif isinstance(data, dict) and "historicalStockList" in data:
-                for entry in data["historicalStockList"]:
-                    if entry.get("symbol", "").replace("-", ".") == ticker.replace("-", "."):
-                        historical = entry.get("historical", [])
-                        break
+            elif isinstance(data, list):
+                historical = [row for row in data if isinstance(row, dict)]
             if historical is not None:
                 return {item["date"]: item["close"] for item in historical}
-        except Exception:  # nosec B112 - intentional fallback to next FMP endpoint
-            continue
+    except Exception:  # nosec B112 - defensive, matches prior behaviour
+        pass
 
-    print(
-        f"Warning: Failed to fetch price data for {ticker}: all endpoints failed", file=sys.stderr
-    )
+    print(f"Warning: Failed to fetch price data for {ticker}: request failed", file=sys.stderr)
     return {}
 
 
