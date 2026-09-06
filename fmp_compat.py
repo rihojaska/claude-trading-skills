@@ -431,34 +431,67 @@ def request_count() -> int:
     return _REQUESTS_MADE
 
 
-def fmp_get(
+FMP_REASONS = frozenset({
+    "no_keys", "attempt_budget", "http_4xx", "bad_json", "null_payload",
+    "rate_limited", "unreachable", "normalize_refused",
+})
+"""Base tokens of the `reason` returned by `fmp_get_typed`.
+
+A reason is a str whose base token (the part before the first ':') is a
+member of this set; an optional suffix carries detail — `http_4xx:404`,
+`rate_limited:429` / `:403` / `:402` / `:quota` (the LAST rate-limit signal
+seen before every key was tried). Invariant: `data is None` exactly when
+`reason is not None`.
+"""
+
+
+def reason_kind(reason: str | None) -> str | None:
+    """Base token of a typed reason (`rate_limited:429` -> `rate_limited`)."""
+    if reason is None:
+        return None
+    return reason.split(":", 1)[0]
+
+
+def fmp_get_typed(
     path: str,
     params: dict | None = None,
     *,
     timeout: int = 15,
     max_retries_per_key: int = 2,
     max_attempts: int | None = None,
-) -> Any | None:
+) -> tuple[Any | None, str | None]:
     """
-    GET an FMP endpoint with automatic key failover.
+    `fmp_get` with a typed miss: returns `(data, None)` on success and
+    `(None, reason)` on every collapse-to-None path (WPP-20260601-020).
+
+    Reasons (base token in `FMP_REASONS`, see `reason_kind`):
+      - `no_keys`            no FMP key in the environment (warned once)
+      - `attempt_budget`     `max_attempts` reached before any success
+      - `http_4xx:<status>`  a non-rate-limit 4xx — a real error, no retry
+      - `bad_json`           HTTP 200 whose body is not JSON
+      - `null_payload`       HTTP 200 whose body is JSON `null`
+      - `rate_limited:<sig>` every key fell through and at least one hit a
+                             rate-limit signal (429 / 403 / 402 / soft quota);
+                             <sig> is the last such signal seen
+      - `unreachable`        every key fell through on network errors / 5xx only
+      - `normalize_refused`  the payload arrived but a normalizer rejected it
+                             (e.g. an EOD fold for a symbol the payload lacks)
+
+    Only `rate_limited:429` means the daily quota; 402/403 on both keys is
+    usually an endpoint entitlement (free tier), and `unreachable` is a
+    transport blip — clients must not latch a run-wide breaker on those
+    (codex plan review r1 P1, 2026-09-06).
 
     `max_attempts` bounds the TOTAL HTTP attempts this call may make across
     retries and key failover (None = unbounded, the historical behaviour).
-    Budgeted callers pass their remaining API-call budget so one fmp_get can
+    Budgeted callers pass their remaining API-call budget so one call can
     never overrun an explicit cap mid-retry (codex nested gate r2 P2,
-    2026-09-06); when the bound is hit the call returns None.
-
-    Tries primary key first; on rate-limit signals, swaps to fallback key.
-    Returns parsed JSON (list or dict), or None on unrecoverable failure.
+    2026-09-06).
 
     Rate-limit detection:
       - HTTP 429 / 403 / 402 → swap key, retry
       - HTTP 200 with JSON "Error Message" containing limit/quota markers → swap
       - Within a single key, retries up to `max_retries_per_key` with 5s backoff
-
-    Usage:
-        data = fmp_get("/stable/key-metrics-ttm", {"symbol": "AAPL"})
-        data = fmp_get("dividends", {"symbol": "AAPL", "limit": 8})
     """
     keys = get_fmp_keys()
     if not keys:
@@ -470,13 +503,14 @@ def fmp_get(
                 file=sys.stderr,
             )
             fmp_get._warned_no_keys = True
-        return None
+        return None, "no_keys"
 
     url = build_url(path) if not path.startswith("http") else _translate_url(path)
     base_params = _prepare_params_for_url(url, params)
     historical_limit = base_params.pop("_tm_limit", None)
 
     attempts_this_call = 0
+    last_rate_limit_signal: str | None = None
     for key_idx, key in enumerate(keys):
         call_params = dict(base_params)
         call_params["apikey"] = key
@@ -487,7 +521,7 @@ def fmp_get(
                     f"fmp_compat: attempt budget ({max_attempts}) exhausted for {url} — giving up",
                     file=sys.stderr,
                 )
-                return None
+                return None, "attempt_budget"
             attempts_this_call += 1
             global _REQUESTS_MADE
             _REQUESTS_MADE += 1
@@ -500,6 +534,7 @@ def fmp_get(
 
             # Hard rate-limit signals → swap key
             if r.status_code in _RATE_LIMIT_STATUS:
+                last_rate_limit_signal = str(r.status_code)
                 break  # exit inner loop, advance to next key
 
             if r.status_code >= 500:
@@ -509,34 +544,72 @@ def fmp_get(
 
             if not r.ok:
                 # 4xx other than rate-limit — probably a real error, bail
-                return None
+                return None, f"http_4xx:{r.status_code}"
 
             # 200 OK — check for soft quota error
             if _looks_like_quota_error(r):
+                last_rate_limit_signal = "quota"
                 break  # swap key
 
             try:
                 data = r.json()
             except ValueError:
-                return None
+                return None, "bad_json"
+            if data is None:
+                return None, "null_payload"
             if "/stable/dividends" in url and isinstance(data, list):
-                return _normalize_dividends_flat_list(data, base_params.get("symbol"))
+                folded = _normalize_dividends_flat_list(data, base_params.get("symbol"))
+                return folded, (None if folded is not None else "normalize_refused")
             if "historical-price-eod/full" in url and isinstance(data, list):
-                return _normalize_eod_flat_list(data, base_params.get("symbol"), historical_limit)
+                folded = _normalize_eod_flat_list(data, base_params.get("symbol"), historical_limit)
+                return folded, (None if folded is not None else "normalize_refused")
             if "historical-price-eod/full" in url and isinstance(data, dict) and "historicalStockList" in data:
                 # The requested symbol may live in the URL (path-form v3 URL
                 # translated to `?symbol=`, or a stable URL with the query
                 # inline) rather than in params (codex nested gate r5 P2).
                 requested = base_params.get("symbol") or _symbol_from_url(url)
-                return _normalize_historical_stock_list(data, requested, historical_limit)
-            return data
+                folded = _normalize_historical_stock_list(data, requested, historical_limit)
+                return folded, (None if folded is not None else "normalize_refused")
+            return data, None
 
         # If we got here, inner loop ended without return → try next key
         if key_idx < len(keys) - 1:
             # brief pause before retrying with fallback
             time.sleep(1.0)
 
-    return None
+    if last_rate_limit_signal is not None:
+        return None, f"rate_limited:{last_rate_limit_signal}"
+    return None, "unreachable"
+
+
+def fmp_get(
+    path: str,
+    params: dict | None = None,
+    *,
+    timeout: int = 15,
+    max_retries_per_key: int = 2,
+    max_attempts: int | None = None,
+) -> Any | None:
+    """
+    GET an FMP endpoint with automatic key failover.
+
+    Bare-`None` back-compat wrapper over `fmp_get_typed` (the 32 existing
+    callers keep their contract; new code that needs to act on WHY a call
+    missed uses `fmp_get_typed`). See `fmp_get_typed` for the retry / failover
+    / attempt-budget semantics.
+
+    Usage:
+        data = fmp_get("/stable/key-metrics-ttm", {"symbol": "AAPL"})
+        data = fmp_get("dividends", {"symbol": "AAPL", "limit": 8})
+    """
+    data, _reason = fmp_get_typed(
+        path,
+        params,
+        timeout=timeout,
+        max_retries_per_key=max_retries_per_key,
+        max_attempts=max_attempts,
+    )
+    return data
 
 
 # ── Monkey-patch requests.get / Session.get for v3 URL rewriting ─────────────
