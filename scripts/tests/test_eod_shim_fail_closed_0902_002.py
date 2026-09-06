@@ -61,3 +61,29 @@ def test_etf_holder_rewrites_to_stable_query_form():
 
 def test_etf_holder_in_map():
     assert any("etf-holder" in k and v.startswith("/stable/etf/holdings?symbol=") for k, v in fmp_compat._V3_TO_STABLE.items())
+
+
+def test_historical_stock_list_is_folded_to_the_single_symbol_shape(capsys):
+    payload = {"historicalStockList": [
+        {"symbol": "MSFT", "historical": [{"date": "2026-01-02", "close": 9.0}]},
+        {"symbol": "AAPL", "historical": [{"date": "2026-01-03", "close": 3.0}, {"date": "2026-01-02", "close": 1.0}]},
+    ]}
+    out = fmp_compat._normalize_historical_stock_list(payload, "AAPL", limit=1)
+    assert out == {"symbol": "AAPL", "historical": [{"date": "2026-01-03", "close": 3.0}]}
+    assert fmp_compat._normalize_historical_stock_list(payload, "NVDA") is None
+    assert "no entry for NVDA" in capsys.readouterr().err
+    bad = {"historicalStockList": [{"symbol": "AAPL", "historical": [{"close": 1.0}]}]}
+    assert fmp_compat._normalize_historical_stock_list(bad, "AAPL") is None
+    assert "refusing the whole series" in capsys.readouterr().err
+
+
+def test_fmp_get_routes_historical_stock_list_through_the_fold(monkeypatch):
+    class _R:
+        status_code, ok, text, headers = 200, True, "", {}
+        url = "https://financialmodelingprep.com/stable/historical-price-eod/full?symbol=AAPL"
+        def json(self):
+            return {"historicalStockList": [{"symbol": "AAPL", "historical": [{"date": "2026-01-02", "close": 1.0}]}]}
+    monkeypatch.setattr(fmp_compat, "_original_get", lambda *a, **k: _R())
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k"])
+    out = fmp_compat.fmp_get("https://financialmodelingprep.com/stable/historical-price-eod/full", {"symbol": "AAPL"})
+    assert out == {"symbol": "AAPL", "historical": [{"date": "2026-01-02", "close": 1.0}]}

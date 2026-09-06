@@ -197,6 +197,41 @@ def _prepare_params_for_url(url: str, params: dict | None) -> dict:
     return prepared
 
 
+def _normalize_historical_stock_list(data: dict, symbol: str | None, limit: int | None = None) -> Any:
+    """Fold the legacy multi-symbol `{"historicalStockList": [{symbol, historical}]}`
+    shape into the single-symbol `{symbol, historical}` contract every fmp_get
+    history caller reads (codex nested gate r3 P2, 2026-09-06). ONE truth for
+    the shape, here, instead of a branch in each caller. The entry for the
+    requested symbol wins; no match → None + one stderr line (fail closed —
+    a wrong symbol's series must never be served as the requested one).
+    """
+    entries = data.get("historicalStockList")
+    if not isinstance(entries, list):
+        return None
+    norm_target = symbol.replace("-", ".") if symbol else None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_symbol = entry.get("symbol")
+        if norm_target and entry_symbol and str(entry_symbol).replace("-", ".") != norm_target:
+            continue
+        historical = entry.get("historical")
+        if not isinstance(historical, list) or not all(isinstance(r, dict) and "date" in r for r in historical):
+            print(
+                f"fmp_compat: historicalStockList entry for {entry_symbol or symbol or '?'} malformed — refusing the whole series",
+                file=sys.stderr,
+            )
+            return None
+        if limit is not None and limit > 0:
+            historical = historical[:limit]
+        return {"symbol": entry_symbol or symbol, "historical": historical}
+    print(
+        f"fmp_compat: historicalStockList carries no entry for {symbol or '?'} — refusing",
+        file=sys.stderr,
+    )
+    return None
+
+
 def _normalize_eod_flat_list(data: Any, symbol: str | None, limit: int | None = None) -> Any:
     """Convert stable historical EOD flat-list data to the legacy v3 shape."""
     if not isinstance(data, list):
@@ -472,6 +507,8 @@ def fmp_get(
                 return _normalize_dividends_flat_list(data, base_params.get("symbol"))
             if "historical-price-eod/full" in url and isinstance(data, list):
                 return _normalize_eod_flat_list(data, base_params.get("symbol"), historical_limit)
+            if "historical-price-eod/full" in url and isinstance(data, dict) and "historicalStockList" in data:
+                return _normalize_historical_stock_list(data, base_params.get("symbol"), historical_limit)
             return data
 
         # If we got here, inner loop ended without return → try next key
