@@ -127,9 +127,10 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
     dividend screeners RSI-blind — every candidate died on "Insufficient price
     data" and every monthly run reported 0 qualified (WPP-20260906-007,
     2026-09-06). Raw closes (auto_adjust=False) to match FMP's ``close``; RSI is
-    scale-invariant, so pence-quoted LSE lines need no fold here. Fail-closed:
+    scale-invariant, so a uniformly pence-quoted LSE series needs no fold here
+    (a MIXED-unit series would — yfinance quotes one unit per line). Fail-closed:
     ``[]`` on ImportError / fetch error / empty frame / no positive closes —
-    never a synthetic or padded series.
+    never a synthetic, padded or provider-spliced series.
     """
     try:
         import yfinance as yf
@@ -142,7 +143,12 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
         return []
     if hist is None or getattr(hist, "empty", True) or "Close" not in hist.columns:
         return []
-    rows: list[dict] = []
+    # Validity contract (codex plan r1 P1): finite positive raw closes only, one
+    # row per exchange-local session (first wins), completed sessions only (a
+    # bar dated today is the live partial session while any venue is open),
+    # newest first, no filling, no splicing with FMP rows.
+    today = datetime.now().date().isoformat()
+    by_date: dict[str, float] = {}
     for idx, close in hist["Close"].items():
         try:
             value = float(close)
@@ -150,8 +156,14 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
             continue
         if value != value or value <= 0:  # NaN / non-positive bar
             continue
-        rows.append({"date": idx.date().isoformat(), "close": value, "data_source": "yfinance"})
-    rows.sort(key=lambda r: r["date"], reverse=True)
+        try:
+            day = idx.date().isoformat()
+        except AttributeError:
+            continue
+        if day >= today or day in by_date:
+            continue
+        by_date[day] = value
+    rows = [{"date": d, "close": by_date[d], "data_source": "yfinance"} for d in sorted(by_date, reverse=True)]
     return rows[:days]
 
 

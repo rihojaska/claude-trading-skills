@@ -126,9 +126,10 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
     dividend screeners RSI-blind — every candidate died on "Insufficient price
     data" and every monthly run reported 0 qualified (WPP-20260906-007,
     2026-09-06). Raw closes (auto_adjust=False) to match FMP's ``close``; RSI is
-    scale-invariant, so pence-quoted LSE lines need no fold here. Fail-closed:
+    scale-invariant, so a uniformly pence-quoted LSE series needs no fold here
+    (a MIXED-unit series would — yfinance quotes one unit per line). Fail-closed:
     ``[]`` on ImportError / fetch error / empty frame / no positive closes —
-    never a synthetic or padded series.
+    never a synthetic, padded or provider-spliced series.
     """
     try:
         import yfinance as yf
@@ -141,7 +142,12 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
         return []
     if hist is None or getattr(hist, "empty", True) or "Close" not in hist.columns:
         return []
-    rows: list[dict] = []
+    # Validity contract (codex plan r1 P1): finite positive raw closes only, one
+    # row per exchange-local session (first wins), completed sessions only (a
+    # bar dated today is the live partial session while any venue is open),
+    # newest first, no filling, no splicing with FMP rows.
+    today = datetime.now().date().isoformat()
+    by_date: dict[str, float] = {}
     for idx, close in hist["Close"].items():
         try:
             value = float(close)
@@ -149,9 +155,104 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
             continue
         if value != value or value <= 0:  # NaN / non-positive bar
             continue
-        rows.append({"date": idx.date().isoformat(), "close": value, "data_source": "yfinance"})
-    rows.sort(key=lambda r: r["date"], reverse=True)
+        try:
+            day = idx.date().isoformat()
+        except AttributeError:
+            continue
+        if day >= today or day in by_date:
+            continue
+        by_date[day] = value
+    rows = [{"date": d, "close": by_date[d], "data_source": "yfinance"} for d in sorted(by_date, reverse=True)]
     return rows[:days]
+
+
+# yfinance annual-statement row labels -> the FMP field vocabulary the analyzer
+# reads. Only fields the growth screen consumes; an absent label is an absent
+# key (the analyzer's `.get(key, 0)` semantics for a sparse FMP row), never 0
+# fabricated in. First label present wins where two map to one key.
+_YF_STATEMENT_FIELDS = {
+    "income_stmt": [
+        ("Total Revenue", "revenue"),
+        ("Diluted EPS", "eps"),
+        ("Net Income", "netIncome"),
+    ],
+    "balance_sheet": [
+        ("Total Debt", "totalDebt"),
+        ("Stockholders Equity", "totalStockholdersEquity"),
+        ("Current Assets", "totalCurrentAssets"),
+        ("Current Liabilities", "totalCurrentLiabilities"),
+    ],
+    "cashflow": [
+        ("Cash Dividends Paid", "dividendsPaid"),
+        ("Common Stock Dividend Paid", "dividendsPaid"),
+        ("Free Cash Flow", "freeCashFlow"),
+        ("Operating Cash Flow", "operatingCashFlow"),
+        ("Capital Expenditure", "capitalExpenditure"),
+        ("Net Income From Continuing Operations", "netIncome"),
+        ("Net Income", "netIncome"),
+        ("Depreciation And Amortization", "depreciationAndAmortization"),
+    ],
+}
+
+
+def _yf_statements(symbol: str, kind: str, limit: int = 5) -> list[dict]:
+    """Annual statements from yfinance in the FMP list-of-dicts shape (newest
+    first, ``date`` + mapped fields + ``data_source``). Free-tier leg for the
+    post-RSI fundamentals gates — the FMP statement endpoints are whitelist
+    gated, so after the price leg every non-US name still died on "Financial
+    health concerns" with an EMPTY balance sheet (codex plan r1 P1,
+    WPP-20260906-007). Fail-closed: ``[]`` on ImportError / error / empty frame."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return []
+    try:
+        frame = getattr(yf.Ticker(symbol), kind)
+    except Exception:
+        return []
+    if frame is None or getattr(frame, "empty", True):
+        return []
+    rows: list[dict] = []
+    for col in list(frame.columns)[:limit]:
+        try:
+            day = col.date().isoformat()
+        except AttributeError:
+            continue
+        row: dict = {"date": day, "data_source": "yfinance"}
+        for label, key in _YF_STATEMENT_FIELDS[kind]:
+            if key in row or label not in frame.index:
+                continue
+            try:
+                value = float(frame.loc[label, col])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if value != value:  # NaN
+                continue
+            row[key] = value
+        rows.append(row)
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return rows
+
+
+def _yf_key_metrics(symbol: str) -> list[dict]:
+    """Single key-metrics row from yfinance ``info`` in FMP vocabulary (decimal
+    ratios, as FMP serves them). Fail-closed: ``[]``."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return []
+    try:
+        info = yf.Ticker(symbol).info or {}
+    except Exception:
+        return []
+    row: dict = {"date": datetime.now().date().isoformat(), "data_source": "yfinance"}
+    for src, key in (("trailingPE", "peRatio"), ("priceToBook", "pbRatio"),
+                     ("returnOnEquity", "roe"), ("profitMargins", "netProfitMargin"),
+                     ("payoutRatio", "payoutRatio")):
+        value = info.get(src)
+        if isinstance(value, (int, float)) and value == value:
+            row[key] = float(value)
+    return [row] if len(row) > 2 else []
 
 
 def _valid_ratio(value: Any) -> Optional[float]:
@@ -168,6 +269,18 @@ def _valid_ratio(value: Any) -> Optional[float]:
     if not math.isfinite(x) or x <= 0:
         return None
     return x
+
+
+def _format_outcomes(analyzed: int, outcomes: dict, unavailable_reasons: dict, unanalyzed: int) -> str:
+    """One machine-readable end-of-run line (see the loop's outcome accounting)."""
+    reasons = ", ".join(f"{k}={v}" for k, v in sorted(unavailable_reasons.items()))
+    return (
+        f"Outcomes: analyzed {analyzed} · qualified {outcomes['qualified']} · "
+        f"rejected_by_criteria {outcomes['rejected_by_criteria']} · "
+        f"unavailable_input {outcomes['unavailable_input']}"
+        + (f" [{reasons}]" if reasons else "")
+        + f" · unanalyzed {unanalyzed}"
+    )
 
 
 def _report_coverage(selected: int, attempted: int, priced: list[str], unpriceable: list[str]) -> None:
@@ -486,22 +599,22 @@ class FMPClient:
     def get_income_statement(self, symbol: str, limit: int = 5) -> Optional[list[dict]]:
         """Get income statement data."""
         result = self._get(f"income-statement/{symbol}", {"limit": limit})
-        return result if result else []
+        return result if result else _yf_statements(symbol, "income_stmt", limit)
 
     def get_balance_sheet(self, symbol: str, limit: int = 5) -> Optional[list[dict]]:
         """Get balance sheet data."""
         result = self._get(f"balance-sheet-statement/{symbol}", {"limit": limit})
-        return result if result else []
+        return result if result else _yf_statements(symbol, "balance_sheet", limit)
 
     def get_cash_flow(self, symbol: str, limit: int = 5) -> Optional[list[dict]]:
         """Get cash flow statement data."""
         result = self._get(f"cash-flow-statement/{symbol}", {"limit": limit})
-        return result if result else []
+        return result if result else _yf_statements(symbol, "cashflow", limit)
 
     def get_key_metrics(self, symbol: str, limit: int = 5) -> Optional[list[dict]]:
         """Get key financial metrics."""
         result = self._get(f"key-metrics/{symbol}", {"limit": limit})
-        return result if result else []
+        return result if result else _yf_key_metrics(symbol)
 
     def get_company_profile(self, symbol: str) -> Optional[dict]:
         """Get company profile including sector information."""
@@ -1125,6 +1238,22 @@ def screen_dividend_growth_pullbacks(
 
     results = []
     frozen_series_skipped = 0
+    # Outcome accounting (codex plan r1 P1 #4): quote coverage is not screening
+    # coverage. Every candidate ends as QUALIFIED, REJECTED_BY_CRITERIA (a gate
+    # evaluated on real data), UNAVAILABLE_INPUT (a required input could not be
+    # fetched — the screen did NOT evaluate that name) or UNANALYZED (rate-limit
+    # break). The end-of-run "Outcomes:" line lets a consumer tell "screen
+    # completed, no matches" from "screen could not run".
+    outcomes = {"qualified": 0, "rejected_by_criteria": 0, "unavailable_input": 0}
+    unavailable_reasons: dict[str, int] = {}
+    unanalyzed = 0
+
+    def _unavailable(reason: str) -> None:
+        outcomes["unavailable_input"] += 1
+        unavailable_reasons[reason] = unavailable_reasons.get(reason, 0) + 1
+
+    def _rejected() -> None:
+        outcomes["rejected_by_criteria"] += 1
 
     for i, stock in enumerate(candidates, 1):
         symbol = stock.get("symbol", "")
@@ -1139,12 +1268,14 @@ def screen_dividend_growth_pullbacks(
                 f"Returning results collected so far: {len(results)} qualified stocks",
                 file=sys.stderr,
             )
+            unanalyzed = len(candidates) - (i - 1)
             break
 
         # Get current price
         current_price = stock.get("price", 0)
         if current_price <= 0:
             print("  ⚠️  No valid price data", file=sys.stderr)
+            _unavailable("price")
             continue
 
         # Fetch dividend history
@@ -1154,18 +1285,25 @@ def screen_dividend_growth_pullbacks(
 
         if not dividend_history:
             print("  ⚠️  No dividend history", file=sys.stderr)
+            _unavailable("dividend_history")
             continue
 
         # Analyze dividend growth
         div_cagr, div_consistent, annual_dividend, div_years_of_growth = (
             analyzer.analyze_dividend_growth(dividend_history)
         )
-        if not div_cagr or div_cagr < min_div_growth:
+        if not div_cagr:
+            print("  ⚠️  Dividend CAGR not computable (history too short)", file=sys.stderr)
+            _unavailable("dividend_history_short")
+            continue
+        if div_cagr < min_div_growth:
             print(f"  ⚠️  Dividend CAGR {div_cagr}% < {min_div_growth}%", file=sys.stderr)
+            _rejected()
             continue
 
         if not annual_dividend:
             print("  ⚠️  Cannot determine annual dividend", file=sys.stderr)
+            _unavailable("annual_dividend")
             continue
 
         # Calculate actual dividend yield
@@ -1175,6 +1313,7 @@ def screen_dividend_growth_pullbacks(
             print(
                 f"  ⚠️  Dividend yield {actual_dividend_yield:.2f}% < {min_yield}%", file=sys.stderr
             )
+            _rejected()
             continue
 
         print(
@@ -1188,6 +1327,7 @@ def screen_dividend_growth_pullbacks(
 
         if not historical_prices or len(historical_prices) < 20:
             print("  ⚠️  Insufficient price data for RSI calculation", file=sys.stderr)
+            _unavailable("price_history")
             continue
 
         # Calculate RSI
@@ -1196,6 +1336,7 @@ def screen_dividend_growth_pullbacks(
 
         if rsi is None:
             print("  ⚠️  RSI calculation failed", file=sys.stderr)
+            _unavailable("price_history")
             continue
 
         if _series_is_frozen_30d(prices):
@@ -1207,10 +1348,12 @@ def screen_dividend_growth_pullbacks(
                 file=sys.stderr,
             )
             frozen_series_skipped += 1
+            _unavailable("frozen_series")
             continue
 
         if rsi > rsi_max:
             print(f"  ⚠️  RSI {rsi} > {rsi_max}", file=sys.stderr)
+            _rejected()
             continue
 
         print(f"  ✓ RSI: {rsi} (oversold)", file=sys.stderr)
@@ -1241,17 +1384,25 @@ def screen_dividend_growth_pullbacks(
 
         if revenue_cagr is not None and revenue_cagr < 0:
             print("  ⚠️  Negative revenue growth", file=sys.stderr)
+            _rejected()
             continue
 
         if eps_cagr is not None and eps_cagr < 0:
             print("  ⚠️  Negative EPS growth", file=sys.stderr)
+            _rejected()
             continue
 
-        # Analyze financial health
-        health_metrics = analyzer.analyze_financial_health(balance_sheet if balance_sheet else [])
+        # Analyze financial health — an EMPTY balance sheet is an unavailable
+        # input, not a failed gate (codex plan r1 P1 #1).
+        if not balance_sheet:
+            print("  ⚠️  Balance sheet unavailable (financial health not evaluated)", file=sys.stderr)
+            _unavailable("balance_sheet")
+            continue
+        health_metrics = analyzer.analyze_financial_health(balance_sheet)
 
         if not health_metrics.get("financially_healthy", False):
             print("  ⚠️  Financial health concerns", file=sys.stderr)
+            _rejected()
             continue
 
         # Extract additional metrics
@@ -1316,6 +1467,7 @@ def screen_dividend_growth_pullbacks(
         result["composite_score"] = analyzer.calculate_composite_score(result)
 
         results.append(result)
+        outcomes["qualified"] += 1
         print(f"  ✅ QUALIFIED - Score: {result['composite_score']}", file=sys.stderr)
 
     # Sort by composite score
@@ -1326,6 +1478,8 @@ def screen_dividend_growth_pullbacks(
     print(f"Qualified Stocks: {len(results)}", file=sys.stderr)
     if frozen_series_skipped:
         print(f"Frozen/thin price series skipped: {frozen_series_skipped}", file=sys.stderr)
+    print(_format_outcomes(len(candidates) - unanalyzed, outcomes, unavailable_reasons, unanalyzed),
+          file=sys.stderr)
     print(f"{'=' * 80}\n", file=sys.stderr)
 
     return results
