@@ -365,3 +365,65 @@ def test_standalone_install_loads_and_degrades_to_yf_only(rel_path, monkeypatch,
     monkeypatch.setattr(mod, "_yf_history", lambda *a, **k: dict(fake_bars))
     data = client.get_historical_prices("SPY", days=30)
     assert data is not None and data["data_source"] == "yfinance"
+
+
+# ── standalone (.skill archive) historical path — codex nested gate r1 P1, 2026-09-06 ──
+#
+# A `.skill` archive bundles fmp_client.py but not the repo-root fmp_compat.py,
+# so the raw fallback must itself bound the EOD request (timeseries → from/to)
+# and fold the stable flat list into the {"symbol", "historical"} shape that
+# `_request_with_fallback` validates — otherwise every packaged family A/B +
+# canslim client returned None for historical prices.
+
+_STANDALONE_HIST_CLIENTS = FAMILY_A + FAMILY_B + ["skills/canslim-screener/scripts/fmp_client.py"]
+
+
+@pytest.mark.parametrize("rel_path", _STANDALONE_HIST_CLIENTS)
+def test_standalone_historical_prices_fold_and_truncate(rel_path, monkeypatch):
+    mod = _load_without_fmp_compat(rel_path)
+    assert mod.fmp_get_typed is None
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return [
+                {"symbol": "AAPL", "date": f"2026-08-{d:02d}", "close": float(d)} for d in (5, 4, 3, 2, 1)
+            ] + [{"symbol": "MSFT", "date": "2026-08-01", "close": 9.0}]
+
+    def fake_get(url, params=None, timeout=None):
+        seen["url"], seen["params"] = url, dict(params)
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+    client = mod.FMPClient(api_key="standalone-key")
+    data = client.get_historical_prices("AAPL", days=3)
+    # earnings-trade-analyzer's public method unwraps to the rows list; the
+    # others return the folded dict — both come from the same fold.
+    rows = data["historical"] if isinstance(data, dict) else data
+    if isinstance(data, dict):
+        assert data["symbol"] == "AAPL"
+    assert rows == [
+        {"date": "2026-08-05", "close": 5.0}, {"date": "2026-08-04", "close": 4.0}, {"date": "2026-08-03", "close": 3.0},
+    ]
+    assert "timeseries" not in seen["params"] and "from" in seen["params"] and "to" in seen["params"]
+    assert seen["params"]["apikey"] == "standalone-key" and "/stable/historical-price-eod/full" in seen["url"]
+
+
+@pytest.mark.parametrize("rel_path", _STANDALONE_HIST_CLIENTS)
+def test_standalone_historical_refuses_a_malformed_series(rel_path, monkeypatch):
+    mod = _load_without_fmp_compat(rel_path)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return [{"symbol": "AAPL", "date": "2026-08-05", "close": 5.0}, {"symbol": "AAPL", "close": 4.0}]
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None: _Resp())
+    client = mod.FMPClient(api_key="standalone-key")
+    assert client.get_historical_prices("AAPL", days=3) is None
+    assert "refusing the series" in (client._last_error or "")

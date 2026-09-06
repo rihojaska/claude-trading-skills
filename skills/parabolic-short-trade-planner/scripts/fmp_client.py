@@ -18,6 +18,7 @@ Features:
 import os
 import sys
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -107,13 +108,52 @@ class FMPClient:
         `fmp_compat.py` (verified via `unzip -l`). One request, no key
         failover, no v3 rung; sets `_last_error` on any miss."""
         try:
-            response = requests.get(url, params={**params, "apikey": self.api_key}, timeout=30)
+            response = requests.get(url, params=self._raw_params(url, params), timeout=30)
             if response.status_code == 200:
-                return response.json()
+                return self._raw_fold(url, params, response.json())
         except (requests.exceptions.RequestException, ValueError):
             pass
         self._last_error = "fmp_compat unavailable: raw stable GET, no failover"
         return None
+
+    def _raw_params(self, url: str, params: dict) -> dict:
+        """Standalone path only: the stable EOD endpoint ignores `timeseries`,
+        so bound the payload with a from/to range the way fmp_compat's
+        `_prepare_params_for_url` does (2x calendar days covers N trading
+        days); the row truncation happens in `_raw_fold`."""
+        prepared = {k: v for k, v in params.items() if k != "timeseries"}
+        if "historical-price-eod/full" in url and "timeseries" in params:
+            today = date.today()
+            prepared["from"] = (today - timedelta(days=int(params["timeseries"]) * 2)).isoformat()
+            prepared["to"] = today.isoformat()
+        prepared["apikey"] = self.api_key
+        return prepared
+
+    def _raw_fold(self, url: str, params: dict, data):
+        """Standalone path only: fold the stable EOD flat list into the
+        `{"symbol", "historical": [...]}` shape `_request_with_fallback`
+        validates (fmp_compat does this on the shared path). Fail CLOSED on a
+        malformed row — a shortened series that still looks complete is
+        laundered evidence (WPP-20260902-002). Non-EOD payloads and the
+        `historicalStockList` dict pass through unchanged (codex nested gate
+        r1 P1, 2026-09-06)."""
+        if "historical-price-eod/full" not in url or not isinstance(data, list):
+            return data
+        symbol = str(params.get("symbol", ""))
+        norm = symbol.replace("-", ".")
+        rows = []
+        for row in data:
+            if not isinstance(row, dict) or "date" not in row:
+                self._last_error = "malformed EOD row in standalone payload — refusing the series"
+                return None
+            row_symbol = row.get("symbol") or symbol
+            if row_symbol.replace("-", ".") != norm:
+                continue
+            rows.append({k: v for k, v in row.items() if k != "symbol"})
+        limit = params.get("timeseries")
+        if limit is not None and int(limit) > 0:
+            rows = rows[: int(limit)]
+        return {"symbol": symbol, "historical": rows}
 
     def _rate_limited_get(
         self, url: str, params: Optional[dict] = None, quiet: bool = False
