@@ -153,7 +153,7 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
             value = float(close)
         except (TypeError, ValueError):
             continue
-        if value != value or value <= 0:  # NaN / non-positive bar
+        if not math.isfinite(value) or value <= 0:  # NaN / ±inf / non-positive bar
             continue
         try:
             day = idx.date().isoformat()
@@ -232,6 +232,20 @@ def _yf_statements(symbol: str, kind: str, limit: int = 5) -> list[dict]:
         rows.append(row)
     rows.sort(key=lambda r: r["date"], reverse=True)
     return rows
+
+
+_BALANCE_SHEET_REQUIRED = ("totalDebt", "totalStockholdersEquity", "totalCurrentAssets", "totalCurrentLiabilities")
+
+
+def _balance_sheet_complete(row: dict) -> bool:
+    """Every field `analyze_financial_health` scores must be a finite number —
+    a sparse row (yfinance omits Current Assets/Liabilities for financials)
+    would otherwise default to None ratios and a free `financially_healthy`."""
+    for key in _BALANCE_SHEET_REQUIRED:
+        value = row.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+            return False
+    return True
 
 
 def _yf_key_metrics(symbol: str) -> list[dict]:
@@ -1392,10 +1406,11 @@ def screen_dividend_growth_pullbacks(
             _rejected()
             continue
 
-        # Analyze financial health — an EMPTY balance sheet is an unavailable
-        # input, not a failed gate (codex plan r1 P1 #1).
-        if not balance_sheet:
-            print("  ⚠️  Balance sheet unavailable (financial health not evaluated)", file=sys.stderr)
+        # Analyze financial health — an EMPTY or INCOMPLETE balance sheet is an
+        # unavailable input, not a failed gate (codex plan r1 P1 #1; nested gate
+        # r1 P1: the analyzer's missing-field defaults would read as healthy).
+        if not balance_sheet or not _balance_sheet_complete(balance_sheet[0]):
+            print("  ⚠️  Balance sheet unavailable/incomplete (financial health not evaluated)", file=sys.stderr)
             _unavailable("balance_sheet")
             continue
         health_metrics = analyzer.analyze_financial_health(balance_sheet)

@@ -199,7 +199,7 @@ def test_fmp_decimal_roe_and_margin_are_converted_to_percent(monkeypatch):
     # assertions this test exists to check.
     client.get_historical_prices.return_value = [{"close": 100 + i * 0.5} for i in range(30)]
     client.get_income_statement.return_value = [{}]
-    client.get_balance_sheet.return_value = [{}]
+    client.get_balance_sheet.return_value = [{"totalDebt": 10.0, "totalStockholdersEquity": 100.0, "totalCurrentAssets": 30.0, "totalCurrentLiabilities": 10.0}]  # complete: an empty row is now an unavailable input (nested gate r1 P1)
     client.get_cash_flow.return_value = [{}]
     client.get_key_metrics.return_value = [{"roe": 0.25, "netProfitMargin": 0.125}]
 

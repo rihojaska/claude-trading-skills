@@ -63,6 +63,16 @@ def test_helper_fails_closed(monkeypatch, frame, exc):
     assert mod._yf_price_history("ALV.DE", days=30) == []
 
 
+def test_helper_drops_non_finite_closes(monkeypatch):
+    """Nested gate r1 P2: +inf passed the NaN/non-positive check and could
+    turn the RSI into NaN (rsi > rsi_max then reads False)."""
+    frame = _frame(45)
+    frame.loc[frame.index[-1], "Close"] = float("inf")
+    _fake_yfinance(monkeypatch, frame=frame)
+    rows = mod._yf_price_history("ALV.DE", days=30)
+    assert rows[0]["date"] == "2026-09-03" and all(r["close"] < 1e9 for r in rows)
+
+
 def test_helper_without_yfinance_is_empty(monkeypatch):
     monkeypatch.setitem(sys.modules, "yfinance", None)
     assert mod._yf_price_history("ALV.DE", days=30) == []

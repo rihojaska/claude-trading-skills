@@ -16,7 +16,6 @@ import types
 from datetime import datetime, timedelta
 
 import pandas as pd
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -140,14 +139,30 @@ class _FakeClient:
 
 
 def test_loop_reports_missing_fundamentals_as_unavailable_not_as_a_failed_gate(monkeypatch, capsys):
-    monkeypatch.setattr(mod, "FMPClient", lambda api_key: _FakeClient(served="GOOD"))
+    client = _FakeClient(served="GOOD")
+    full_bs = client.get_balance_sheet
+
+    def sparse_bs(symbol, limit=5):
+        if symbol == "SPARSE":  # yfinance shape for a financial: no current assets/liabilities
+            return [{"date": COLS[0], "totalDebt": 10.0, "totalStockholdersEquity": 100.0}]
+        return full_bs(symbol, limit)
+    client.get_balance_sheet = sparse_bs
+    monkeypatch.setattr(mod, "FMPClient", lambda api_key: client)
     monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
-    results = mod.screen_dividend_growth_pullbacks("dummy", universe_symbols=["GOOD", "COLD"])
+    results = mod.screen_dividend_growth_pullbacks("dummy", universe_symbols=["GOOD", "COLD", "SPARSE"])
     err = capsys.readouterr().err
     assert [r["symbol"] for r in results] == ["GOOD"]
     assert "Balance sheet unavailable" in err and "Financial health concerns" not in err
     line = next(l for l in err.splitlines() if l.startswith("Outcomes:"))
-    assert line == "Outcomes: analyzed 2 · qualified 1 · rejected_by_criteria 0 · unavailable_input 1 [balance_sheet=1] · unanalyzed 0"
+    assert line == "Outcomes: analyzed 3 · qualified 1 · rejected_by_criteria 0 · unavailable_input 2 [balance_sheet=2] · unanalyzed 0"
+
+
+def test_balance_sheet_completeness_requires_every_scored_field_finite():
+    ok = {"totalDebt": 1.0, "totalStockholdersEquity": 2.0, "totalCurrentAssets": 3.0, "totalCurrentLiabilities": 4.0}
+    assert mod._balance_sheet_complete(ok)
+    assert not mod._balance_sheet_complete({**ok, "totalCurrentAssets": float("nan")})
+    assert not mod._balance_sheet_complete({k: v for k, v in ok.items() if k != "totalDebt"})
+    assert not mod._balance_sheet_complete({**ok, "totalDebt": None})
 
 
 def test_loop_counts_criteria_rejections_separately(monkeypatch, capsys):

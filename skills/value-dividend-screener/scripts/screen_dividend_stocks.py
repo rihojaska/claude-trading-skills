@@ -154,7 +154,7 @@ def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
             value = float(close)
         except (TypeError, ValueError):
             continue
-        if value != value or value <= 0:  # NaN / non-positive bar
+        if not math.isfinite(value) or value <= 0:  # NaN / ±inf / non-positive bar
             continue
         try:
             day = idx.date().isoformat()
