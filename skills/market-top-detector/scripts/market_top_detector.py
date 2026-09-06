@@ -91,6 +91,16 @@ def parse_arguments():
         help="VIX term structure state",
     )
     parser.add_argument(
+        "--vix-term-date",
+        default=None,
+        help=(
+            "YYYY-MM-DD the --vix-term reading was taken; optional. A dated CLI "
+            "value gets a vix_term freshness leg; an undated one keeps the "
+            "by-design exclusion (no natural date) and is never charged 0.70. "
+            "Auto-detected term structure carries its own quote date."
+        ),
+    )
+    parser.add_argument(
         "--margin-debt-yoy",
         type=float,
         default=None,
@@ -164,7 +174,11 @@ def build_data_coverage(data_availability: dict, symbol_sources: dict) -> dict:
 
 # Value flag <-> date flag pairs. Keyed by freshness label; the value dest does
 # not always match the label (--margin-debt-yoy dates via --margin-debt-date).
-# --vix-term has no date partner and is excluded by design.
+# --vix-term is NOT a pair by design: a CLI term-structure label has no natural
+# date, so an undated --vix-term is never scored as "undated" (0.70). Its
+# freshness leg exists only when a date is KNOWN — the auto-detected path
+# carries the older of the two quote dates, and --vix-term-date is an optional
+# CLI partner (WPP-20260901-019).
 _FLAG_PAIRS = {
     "breadth_200dma": ("breadth_200dma", "breadth_200dma_date"),
     "breadth_50dma": ("breadth_50dma", "breadth_50dma_date"),
@@ -247,6 +261,7 @@ def compute_data_freshness(date_args: dict, undated_present=()) -> dict:
         "breadth_50dma_date": "breadth_50dma",
         "put_call_date": "put_call",
         "margin_debt_date": "margin_debt",
+        "vix_term_date": "vix_term",  # present only when a date is known (WPP-20260901-019)
     }
 
     result = {}
@@ -563,6 +578,11 @@ def main():
         "breadth_50dma_date": args.breadth_50dma_date,
         "put_call_date": args.put_call_date,
         "margin_debt_date": args.margin_debt_date,
+        # Auto-detected term structure carries its own quote date; a CLI
+        # --vix-term uses --vix-term-date when given, else NO leg (never 0.70).
+        "vix_term_date": (vix_term_auto or {}).get("date")
+        if args.vix_term is None
+        else args.vix_term_date,
     }
     data_freshness = compute_data_freshness(freshness_args, undated_present=undated_inputs)
 
@@ -675,6 +695,7 @@ def main():
                 "breadth_50dma": args.breadth_50dma,
                 "put_call_ratio": args.put_call,
                 "vix_term_structure": args.vix_term,
+                "vix_term_date": args.vix_term_date,
                 "margin_debt_yoy_pct": args.margin_debt_yoy,
             },
             "vix_term_auto": vix_term_auto,

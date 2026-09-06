@@ -315,8 +315,32 @@ def _yf_quote(symbol: str) -> Optional[dict]:
         "volume": latest["volume"],
         "yearHigh": year_high,
         "yearLow": year_low,
+        "date": latest.get("date"),  # bar date — the quote's freshness leg (WPP-20260901-019)
         "data_source": "yfinance",
     }
+
+
+def _quote_date(quote: Optional[dict]) -> Optional[str]:
+    """ISO date a quote record was priced on, or None (WPP-20260901-019).
+
+    yfinance-derived quotes carry the bar `date`; FMP quotes carry an epoch
+    `timestamp`. Anything else (or a malformed value) is None — an absent
+    date is reported, never guessed.
+    """
+    if not isinstance(quote, dict):
+        return None
+    raw = quote.get("date")
+    if isinstance(raw, str) and len(raw) >= 10:
+        return raw[:10]
+    ts = quote.get("timestamp")
+    if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+
+            return _dt.fromtimestamp(float(ts), tz=_tz.utc).date().isoformat()
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
 
 
 class FMPClient:
@@ -661,11 +685,19 @@ class FMPClient:
         else:
             classification = "backwardation"
 
+        # Freshness leg (WPP-20260901-019): the OLDER of the two quote dates,
+        # and only when BOTH are known — a half-dated pair reports None (no
+        # leg is emitted downstream) rather than a guessed date.
+        vix_date = _quote_date(vix_quotes[0])
+        vix3m_date = _quote_date(vix3m_quotes[0])
+        term_date = min(vix_date, vix3m_date) if (vix_date and vix3m_date) else None
+
         return {
             "vix": round(vix_price, 2),
             "vix3m": round(vix3m_price, 2),
             "ratio": round(ratio, 3),
             "classification": classification,
+            "date": term_date,
         }
 
     def get_api_stats(self) -> dict:
