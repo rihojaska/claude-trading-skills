@@ -22,12 +22,13 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import requests
@@ -114,6 +115,37 @@ def _yf_quote_profile(symbol: str) -> Optional[dict]:
         "industry": info.get("industry", ""),
         "data_source": "yfinance",
     }
+
+
+def _valid_ratio(value: Any) -> Optional[float]:
+    """A P/E or P/B that can feed a verdict: finite and > 0, else None.
+
+    Validity only — screening eligibility (pe_max / pb_max) is a separate
+    question. A missing or non-positive ratio must never masquerade as a
+    cheap one (WPP-20260603-031; codex plan review r1 P1/P2, 2026-09-06).
+    """
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or x <= 0:
+        return None
+    return x
+
+
+def _report_coverage(selected: int, attempted: int, priced: list[str], unpriceable: list[str]) -> None:
+    """One end-of-run stderr line so a thin result set is never mistaken for a
+    thin universe: symbols never attempted (rate-limit break) are reported
+    apart from symbols attempted and un-priceable (WPP-20260603-031)."""
+    unattempted = selected - attempted
+    print(
+        f"Coverage: selected {selected} · attempted {attempted} · priced {len(priced)} · "
+        f"un-priceable {len(unpriceable)}"
+        + (f" [{', '.join(unpriceable)}]" if unpriceable else "")
+        + f" · unattempted {unattempted}"
+        + (" (rate-limit break)" if unattempted else ""),
+        file=sys.stderr,
+    )
 
 
 class FINVIZClient:
@@ -549,7 +581,10 @@ def build_candidates_from_universe(
     selected = symbols[:max_candidates] if max_candidates else symbols
     candidates: list[dict] = []
     print(f"Fetching quote and profile data for {len(selected)} local-universe symbols...", file=sys.stderr)
+    attempted = 0
+    unpriceable: list[str] = []
     for symbol in selected:
+        attempted += 1
         quote = client._get(f"quote/{symbol}")
         if quote and isinstance(quote, list) and len(quote) > 0:
             stock_data = quote[0].copy()
@@ -563,8 +598,11 @@ def build_candidates_from_universe(
             stock_data = _yf_quote_profile(symbol)
             if stock_data:
                 candidates.append(stock_data)
+            else:
+                unpriceable.append(symbol)
         if client.rate_limit_reached:
             break
+    _report_coverage(len(selected), attempted, [c.get("symbol", "") for c in candidates], unpriceable)
     return candidates
 
 
@@ -1190,8 +1228,10 @@ def screen_value_dividend_stocks(
                 # stay populated for FINVIZ-sourced candidates too.
                 ratios = client._get(f"ratios/{symbol}", {"limit": 1})
                 if isinstance(ratios, list) and ratios:
-                    stock_data["pe"] = ratios[0].get("priceToEarningsRatio")
-                    stock_data["priceToBook"] = ratios[0].get("priceToBookRatio")
+                    # Same validity clamp as the local-universe site above
+                    # (`0 < x`): a non-positive ratio is not a cheap one.
+                    stock_data["pe"] = _valid_ratio(ratios[0].get("priceToEarningsRatio"))
+                    stock_data["priceToBook"] = _valid_ratio(ratios[0].get("priceToBookRatio"))
                 candidates.append(stock_data)
 
             if client.rate_limit_reached:
@@ -1377,8 +1417,8 @@ def screen_value_dividend_stocks(
             "price": stock.get("price", 0),
             "dividend_yield": round(actual_dividend_yield, 2),
             "annual_dividend": round(annual_dividend, 2),
-            "pe_ratio": stock.get("pe", 0),
-            "pb_ratio": stock.get("priceToBook", 0),
+            "pe_ratio": _valid_ratio(stock.get("pe")),
+            "pb_ratio": _valid_ratio(stock.get("priceToBook")),
             "rsi": rsi,
             "dividend_cagr_3y": round(div_cagr, 2),
             "dividend_consistent": div_consistent,

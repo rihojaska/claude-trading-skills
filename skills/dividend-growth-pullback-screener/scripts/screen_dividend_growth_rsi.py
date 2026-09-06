@@ -25,12 +25,13 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
 import sys
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import requests
 
@@ -113,6 +114,37 @@ def _yf_quote_profile(symbol: str) -> Optional[dict]:
         "industry": info.get("industry", ""),
         "data_source": "yfinance",
     }
+
+
+def _valid_ratio(value: Any) -> Optional[float]:
+    """A P/E or P/B that can feed a verdict: finite and > 0, else None.
+
+    Validity only — screening eligibility (pe_max / pb_max) is a separate
+    question. A missing or non-positive ratio must never masquerade as a
+    cheap one (WPP-20260603-031; codex plan review r1 P1/P2, 2026-09-06).
+    """
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or x <= 0:
+        return None
+    return x
+
+
+def _report_coverage(selected: int, attempted: int, priced: list[str], unpriceable: list[str]) -> None:
+    """One end-of-run stderr line so a thin result set is never mistaken for a
+    thin universe: symbols never attempted (rate-limit break) are reported
+    apart from symbols attempted and un-priceable (WPP-20260603-031)."""
+    unattempted = selected - attempted
+    print(
+        f"Coverage: selected {selected} · attempted {attempted} · priced {len(priced)} · "
+        f"un-priceable {len(unpriceable)}"
+        + (f" [{', '.join(unpriceable)}]" if unpriceable else "")
+        + f" · unattempted {unattempted}"
+        + (" (rate-limit break)" if unattempted else ""),
+        file=sys.stderr,
+    )
 
 
 class FINVIZClient:
@@ -511,12 +543,18 @@ def build_candidates_from_universe(
     selected = symbols[:max_candidates] if max_candidates else symbols
     candidates: list[dict] = []
     print(f"Fetching quote and profile data for {len(selected)} local-universe symbols...", file=sys.stderr)
+    attempted = 0
+    unpriceable: list[str] = []
     for symbol in selected:
+        attempted += 1
         stock_data = client.get_quote_with_profile(symbol)
         if stock_data:
             candidates.append(stock_data)
+        else:
+            unpriceable.append(symbol)
         if client.rate_limit_reached:
             break
+    _report_coverage(len(selected), attempted, [c.get("symbol", "") for c in candidates], unpriceable)
     return candidates
 
 
@@ -933,19 +971,23 @@ class StockAnalyzer:
         else:
             score += 5
 
-        # Valuation Score (10 points max) - Context only, not exclusionary
-        pe_ratio = stock_data.get("pe_ratio", 999)
-        pb_ratio = stock_data.get("pb_ratio", 999)
+        # Valuation Score (10 points max) - Context only, not exclusionary.
+        # A missing/invalid ratio earns 0 points: the old `0` default scored
+        # an absent P/E as the cheapest possible one (codex plan review r1 P1).
+        pe_ratio = _valid_ratio(stock_data.get("pe_ratio"))
+        pb_ratio = _valid_ratio(stock_data.get("pb_ratio"))
 
-        if pe_ratio < 15:
-            score += 5
-        elif pe_ratio < 25:
-            score += 3
+        if pe_ratio is not None:
+            if pe_ratio < 15:
+                score += 5
+            elif pe_ratio < 25:
+                score += 3
 
-        if pb_ratio < 3:
-            score += 5
-        elif pb_ratio < 5:
-            score += 3
+        if pb_ratio is not None:
+            if pb_ratio < 3:
+                score += 5
+            elif pb_ratio < 5:
+                score += 3
 
         return round(min(score, 100), 1)
 
@@ -1209,8 +1251,8 @@ def screen_dividend_growth_pullbacks(
             "dividend_cagr_3y": div_cagr,
             "dividend_consistent": div_consistent,
             "rsi": rsi,
-            "pe_ratio": latest_metrics.get("peRatio", 0),
-            "pb_ratio": latest_metrics.get("pbRatio", 0),
+            "pe_ratio": _valid_ratio(latest_metrics.get("peRatio")),
+            "pb_ratio": _valid_ratio(latest_metrics.get("pbRatio")),
             "revenue_cagr_3y": revenue_cagr,
             "eps_cagr_3y": eps_cagr,
             "payout_ratio": payout_ratio,
