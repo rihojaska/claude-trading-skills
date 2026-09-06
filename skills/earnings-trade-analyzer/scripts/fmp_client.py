@@ -158,6 +158,12 @@ class FMPClient:
             if row_symbol.replace("-", ".") != norm:
                 continue
             rows.append({k: v for k, v in row.items() if k != "symbol"})
+        if data and not rows:
+            # Non-empty payload, zero rows for the requested symbol: identity
+            # mismatch, refuse rather than return a truthy empty series
+            # (codex nested gate r3 P2).
+            self._last_error = "EOD payload carries no rows for the requested symbol — refusing the series"
+            return None
         limit = params.get("timeseries")
         if limit is not None and int(limit) > 0:
             rows = rows[: int(limit)]

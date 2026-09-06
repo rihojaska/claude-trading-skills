@@ -1139,11 +1139,10 @@ class TestFMPHistoricalNormalizer:
         result = client.get_historical_prices("SPY", days=2)
         assert result == {"symbol": "SPY", "historical": []}
 
-    def test_eod_symbol_mismatch_yields_empty_history(self, monkeypatch):
-        """List with no matching symbol -> fmp_compat folds to empty history
-        under the requested symbol (`_normalize_eod_flat_list` only drops
-        non-matching rows, it does not refuse); the client's shape validation
-        accepts it since the folded `symbol` field matches the request."""
+    def test_eod_symbol_mismatch_is_refused(self, monkeypatch):
+        """List with rows but none for the requested symbol -> fmp_compat
+        REFUSES the fold (identity mismatch, codex nested gate r3 P2); the
+        client sees None, never a truthy empty series."""
 
         def get_response(url, params=None, timeout=None):
             return _mock_response(
@@ -1154,7 +1153,7 @@ class TestFMPHistoricalNormalizer:
         client = self._make_client()
 
         result = client.get_historical_prices("SPY", days=2)
-        assert result == {"symbol": "SPY", "historical": []}
+        assert result is None  # identity mismatch is refused (codex nested gate r3 P2)
 
     def test_eod_row_without_symbol_field(self, monkeypatch):
         """Single-symbol endpoint may omit per-row 'symbol' -> treat as requested symbol."""

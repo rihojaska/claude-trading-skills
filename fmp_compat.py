@@ -280,6 +280,18 @@ def _normalize_eod_flat_list(data: Any, symbol: str | None, limit: int | None = 
         matched_symbol = matched_symbol or row_symbol
         historical.append({k: v for k, v in row.items() if k != "symbol"})
 
+    if not historical:
+        # Non-empty payload, zero rows for the requested symbol = identity
+        # mismatch, not an empty series: a truthy {"historical": []} passes
+        # every client's shape check and silently drops the symbol (codex
+        # nested gate r3 P2, 2026-09-06). Refuse; an empty payload `[]`
+        # above stays a genuine empty series.
+        print(
+            f"fmp_compat: EOD payload for {symbol or '?'} carries {len(data)} row(s) "
+            f"but none for the requested symbol — refusing the series",
+            file=sys.stderr,
+        )
+        return None
     if limit is not None and limit > 0:
         historical = historical[:limit]
     return {"symbol": matched_symbol or symbol, "historical": historical}

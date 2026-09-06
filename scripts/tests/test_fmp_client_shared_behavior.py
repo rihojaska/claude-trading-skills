@@ -515,3 +515,22 @@ def test_non_budget_usage_counts_every_attempt_on_failover(rel_path, monkeypatch
     assert client.get_quote("AAPL")
     assert client.api_calls_made == 2
     assert client.rate_limit_reached is False, "a failover that succeeded is not a quota latch"
+
+
+@pytest.mark.parametrize("rel_path", FAMILY_A + FAMILY_B + ["skills/canslim-screener/scripts/fmp_client.py"])
+def test_standalone_foreign_symbol_only_payload_is_refused(rel_path, monkeypatch):
+    """codex nested gate r3 P2: the standalone fold mirrors the shared one —
+    a non-empty payload with zero rows for the requested symbol is refused."""
+    mod = _load_without_fmp_compat(rel_path)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return [{"symbol": "MSFT", "date": "2026-08-05", "close": 5.0}]
+
+    monkeypatch.setattr(mod.requests, "get", lambda url, params=None, timeout=None: _Resp())
+    client = mod.FMPClient(api_key="standalone-key")
+    assert client.get_historical_prices("AAPL", days=3) is None
+    assert "no rows for the requested symbol" in (client._last_error or "")

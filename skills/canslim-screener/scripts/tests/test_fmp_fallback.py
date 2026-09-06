@@ -171,7 +171,7 @@ class TestHistoricalShape:
 
         _drive_real_transport(monkeypatch, get_response)
         result = client.get_historical_prices("^GSPC", days=10)
-        assert result == {"symbol": "^GSPC", "historical": []}
+        assert result is None  # identity mismatch is refused (codex nested gate r3 P2)
 
     def test_historical_all_keys_fail_returns_none(self, monkeypatch):
         client = _make_client()

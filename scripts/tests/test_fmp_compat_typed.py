@@ -208,3 +208,22 @@ def test_fmp_get_is_the_bare_none_wrapper_with_the_same_signature(seam):
     assert fmp_compat.fmp_get("/stable/profile", {"symbol": "AAPL"}) is None
     script.append(_Resp(200, {"ok": 1}))
     assert fmp_compat.fmp_get("/stable/profile", {"symbol": "AAPL"}) == {"ok": 1}
+
+
+def test_eod_foreign_symbol_only_payload_is_normalize_refused(seam, capsys):
+    """Non-empty EOD payload with zero rows for the requested symbol = identity
+    mismatch → refused, never a truthy empty series (codex nested gate r3 P2)."""
+    script, _ = seam
+    script.append(_Resp(200, [{"symbol": "MSFT", "date": "2026-09-05", "close": 1.0}]))
+    data, reason = fmp_compat.fmp_get_typed(
+        "/stable/historical-price-eod/full", {"symbol": "AAPL", "from": "2026-01-01", "to": "2026-09-05"}
+    )
+    assert (data, reason) == (None, "normalize_refused")
+    assert "none for the requested symbol" in capsys.readouterr().err
+
+
+def test_eod_empty_payload_stays_a_genuine_empty_series(seam):
+    script, _ = seam
+    script.append(_Resp(200, []))
+    data, reason = fmp_compat.fmp_get_typed("/stable/historical-price-eod/full", {"symbol": "AAPL", "from": "2026-01-01", "to": "2026-09-05"})
+    assert data == {"symbol": "AAPL", "historical": []} and reason is None
