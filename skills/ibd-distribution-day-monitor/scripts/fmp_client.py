@@ -110,9 +110,17 @@ class FMPClient:
             response = requests.get(url, params=self._raw_params(url, params), timeout=30)
             if response.status_code == 200:
                 return self._raw_fold(url, params, response.json())
-        except (requests.exceptions.RequestException, ValueError):
-            pass
-        self._last_error = "fmp_compat unavailable: raw stable GET, no failover"
+            if response.status_code == 429:
+                # No second key on this path: an exhausted quota must stop
+                # the run instead of burning every later symbol against it
+                # (codex nested gate r2 P1).
+                self.rate_limit_reached = True
+                self._last_error = "HTTP 429 (daily rate limit) — standalone, no failover"
+                return None
+            self._last_error = f"HTTP {response.status_code} — standalone, no failover"
+            return None
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            self._last_error = f"standalone request failed: {type(exc).__name__}"
         return None
 
     def _raw_params(self, url: str, params: dict) -> dict:

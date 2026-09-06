@@ -113,17 +113,21 @@ class TestQuoteShape:
         result = client.get_quote("^GSPC")
         assert result is None
 
-    def test_batch_quote_skips_symbol_check(self, monkeypatch):
-        """Multi-symbol (comma) quote does not apply the single-symbol check."""
+    def test_batch_quote_fans_out_per_symbol(self, monkeypatch):
+        """A comma list is served as one /stable/quote request PER symbol and
+        merged (stable does not batch; codex nested gate r2 P2, 2026-09-06)."""
         client = _make_client()
-        batch_data = [{"symbol": "^GSPC", "price": 5000}, {"symbol": "^VIX", "price": 20}]
+        by_symbol = {"^GSPC": [{"symbol": "^GSPC", "price": 5000}], "^VIX": [{"symbol": "^VIX", "price": 20}]}
+        seen = []
 
         def get_response(url, params=None, timeout=None):
-            return _resp(200, batch_data)
+            seen.append(params["symbol"])
+            return _resp(200, by_symbol[params["symbol"]])
 
         _drive_real_transport(monkeypatch, get_response)
         result = client.get_quote("^GSPC,^VIX")
-        assert result == batch_data
+        assert result == by_symbol["^GSPC"] + by_symbol["^VIX"]
+        assert seen == ["^GSPC", "^VIX"]
 
 
 class TestHistoricalShape:

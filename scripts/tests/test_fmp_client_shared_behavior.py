@@ -427,3 +427,91 @@ def test_standalone_historical_refuses_a_malformed_series(rel_path, monkeypatch)
     client = mod.FMPClient(api_key="standalone-key")
     assert client.get_historical_prices("AAPL", days=3) is None
     assert "refusing the series" in (client._last_error or "")
+
+
+# ── codex nested gate r2 (2026-09-06): standalone 429 latches; comma quotes fan out; usage counts attempts ──
+
+_QUOTE_CLIENTS = FAMILY_A + [
+    "skills/canslim-screener/scripts/fmp_client.py",
+    "skills/ftd-detector/scripts/fmp_client.py",
+    "skills/market-top-detector/scripts/fmp_client.py",
+]
+
+
+@pytest.mark.parametrize("rel_path", FAMILY_A + FAMILY_B + ["skills/canslim-screener/scripts/fmp_client.py"])
+def test_standalone_429_latches_the_breaker(rel_path, monkeypatch):
+    mod = _load_without_fmp_compat(rel_path)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 429
+
+        def json(self):
+            return {}
+
+    def fake_get(url, params=None, timeout=None):
+        calls["n"] += 1
+        return _Resp()
+
+    monkeypatch.setattr(mod.requests, "get", fake_get)
+    client = mod.FMPClient(api_key="standalone-key")
+    assert client.get_historical_prices("AAPL", days=3) is None
+    assert client.rate_limit_reached is True
+    assert client.get_historical_prices("MSFT", days=3) is None
+    assert calls["n"] == 1, "after the latch no further HTTP request may be made"
+
+
+@pytest.mark.parametrize("rel_path", _QUOTE_CLIENTS)
+def test_comma_separated_quote_fans_out_per_symbol(rel_path, monkeypatch):
+    import fmp_compat
+
+    mod = _load(rel_path)
+    monkeypatch.setenv("FMP_API_KEY", "k1")
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k1"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    seen = []
+
+    class _Resp:
+        def __init__(self, sym):
+            self.status_code, self.ok, self.text, self.headers, self.url = 200, True, "", {}, ""
+            self._sym = sym
+
+        def json(self):
+            return [{"symbol": self._sym, "price": 1.0}]
+
+    def fake_get(url, params=None, timeout=None):
+        seen.append(params["symbol"])
+        return _Resp(params["symbol"])
+
+    monkeypatch.setattr(fmp_compat, "_original_get", fake_get)
+    client = mod.FMPClient(api_key="k1")
+    rows = client.get_quote("^GSPC,^VIX")
+    assert [r["symbol"] for r in rows] == ["^GSPC", "^VIX"]
+    assert seen == ["^GSPC", "^VIX"], "one /stable/quote request per symbol, never a comma list"
+
+
+@pytest.mark.parametrize("rel_path", FAMILY_A + ["skills/canslim-screener/scripts/fmp_client.py"])
+def test_non_budget_usage_counts_every_attempt_on_failover(rel_path, monkeypatch):
+    import fmp_compat
+
+    mod = _load(rel_path)
+    monkeypatch.setenv("FMP_API_KEY", "k1")
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k1", "k2"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_a, **_k: None)
+    script = [429, 200]
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code, self.ok, self.text, self.headers, self.url = code, code < 400, "", {}, ""
+
+        def json(self):
+            return [{"symbol": "AAPL", "price": 1.0}]
+
+    monkeypatch.setattr(fmp_compat, "_original_get", lambda url, params=None, timeout=None: _Resp(script.pop(0)))
+    client = mod.FMPClient(api_key="k1")
+    assert client.get_quote("AAPL")
+    assert client.api_calls_made == 2
+    assert client.rate_limit_reached is False, "a failover that succeeded is not a quota latch"

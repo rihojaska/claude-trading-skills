@@ -433,6 +433,22 @@ class FMPClient:
         None if the endpoint fails.
         """
         params = dict(extra_params) if extra_params else {}
+        if endpoint_key == "quote" and "," in symbols_str:
+            # /stable/quote serves ONE symbol per request (a comma list
+            # returns nothing — verified live 2026-09-06); fan a legacy
+            # comma-separated call out per symbol and merge (codex nested
+            # gate r2 P2). Stops at the breaker like any other loop.
+            merged: list = []
+            for one in symbols_str.split(","):
+                one = one.strip()
+                if not one:
+                    continue
+                rows = self._request_with_fallback("quote", one, extra_params)
+                if rows:
+                    merged.extend(rows)
+                if self.rate_limit_reached:
+                    break
+            return merged or None
         endpoints = _FMP_ENDPOINTS[endpoint_key]
         is_single = "," not in symbols_str
 

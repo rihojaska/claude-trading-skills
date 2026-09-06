@@ -501,20 +501,20 @@ class TestEndpointFallback:
         assert result["symbol"] == "^GSPC"
         assert client.session.get.call_count == 1
 
-    def test_batch_quote_skips_symbol_check(self):
-        """Multi-symbol (batch) quote does not apply symbol mismatch check."""
+    def test_batch_quote_fans_out_per_symbol(self):
+        """A comma list is served as one /stable/quote request PER symbol and
+        merged (stable does not batch; codex nested gate r2 P2, 2026-09-06)."""
         client = self._make_client()
-        batch_data = [{"symbol": "^GSPC", "price": 5000}, {"symbol": "^VIX", "price": 20}]
-        resp = _mock_response(200, batch_data)
-        client.session.get = MagicMock(return_value=resp)
+        by_symbol = {"^GSPC": [{"symbol": "^GSPC", "price": 5000}], "^VIX": [{"symbol": "^VIX", "price": 20}]}
 
+        def fake_get(url, params=None, timeout=None, **_kw):
+            return _mock_response(200, by_symbol[params["symbol"]])
+
+        client.session.get = MagicMock(side_effect=fake_get)
         result = client.get_quote("^GSPC,^VIX")
-        assert result == batch_data
-        assert client.session.get.call_count == 1
-
-    # ------------------------------------------------------------------
-    # Skill-specific tests
-    # ------------------------------------------------------------------
+        assert result == by_symbol["^GSPC"] + by_symbol["^VIX"]
+        assert client.session.get.call_count == 2
+        assert [c.kwargs["params"]["symbol"] for c in client.session.get.call_args_list] == ["^GSPC", "^VIX"]
 
     def test_vix_term_structure_works_via_fallback(self):
         """VIX term structure succeeds when get_quote falls back to yfinance

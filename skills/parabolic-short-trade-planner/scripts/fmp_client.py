@@ -33,7 +33,7 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 try:
-    from fmp_compat import fmp_get_typed, key_override
+    from fmp_compat import fmp_get_typed, key_override, request_count
 except ImportError:  # standalone .skill install without the repo-root module
     fmp_get_typed = None
 
@@ -111,9 +111,17 @@ class FMPClient:
             response = requests.get(url, params=self._raw_params(url, params), timeout=30)
             if response.status_code == 200:
                 return self._raw_fold(url, params, response.json())
-        except (requests.exceptions.RequestException, ValueError):
-            pass
-        self._last_error = "fmp_compat unavailable: raw stable GET, no failover"
+            if response.status_code == 429:
+                # No second key on this path: an exhausted quota must stop
+                # the run instead of burning every later symbol against it
+                # (codex nested gate r2 P1).
+                self.rate_limit_reached = True
+                self._last_error = "HTTP 429 (daily rate limit) — standalone, no failover"
+                return None
+            self._last_error = f"HTTP {response.status_code} — standalone, no failover"
+            return None
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            self._last_error = f"standalone request failed: {type(exc).__name__}"
         return None
 
     def _raw_params(self, url: str, params: dict) -> dict:
@@ -185,9 +193,12 @@ class FMPClient:
         # A caller-supplied key differing from the ambient FMP_API_KEY is
         # scoped to this call only; FMP_FALLBACK_API_KEY is never touched.
         override = self.api_key if self.api_key != os.environ.get("FMP_API_KEY") else None
+        before = request_count()
         with key_override(override):
             data, reason = fmp_get_typed(url, params=params, timeout=30, max_retries_per_key=1)
-        self.api_calls_made += 1
+        # Usage stats count every HTTP attempt (retries + key failover), not
+        # one per logical call (codex nested gate r2 P2).
+        self.api_calls_made += max(1, request_count() - before)
         self.last_call_time = time.time()
         self._last_error = reason
         if data is None:
@@ -212,6 +223,22 @@ class FMPClient:
         last-endpoint error and have no clue what really went wrong.
         """
         params = dict(extra_params) if extra_params else {}
+        if endpoint_key == "quote" and "," in symbols_str:
+            # /stable/quote serves ONE symbol per request (a comma list
+            # returns nothing — verified live 2026-09-06); fan a legacy
+            # comma-separated call out per symbol and merge (codex nested
+            # gate r2 P2). Stops at the breaker like any other loop.
+            merged: list = []
+            for one in symbols_str.split(","):
+                one = one.strip()
+                if not one:
+                    continue
+                rows = self._request_with_fallback("quote", one, extra_params)
+                if rows:
+                    merged.extend(rows)
+                if self.rate_limit_reached:
+                    break
+            return merged or None
         endpoints = _FMP_ENDPOINTS[endpoint_key]
         is_single = "," not in symbols_str
 
