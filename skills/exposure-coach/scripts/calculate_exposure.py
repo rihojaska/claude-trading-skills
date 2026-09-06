@@ -1060,8 +1060,16 @@ def main():
     # Ensure output directory exists
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Generate timestamp for filenames
-    timestamp = now.strftime("%Y-%m-%d_%H%M%S")
+    # Generate timestamp for filenames — LOCAL clock (WPP-20260902-001): every
+    # other producer in the Monday chain (breadth, top, ftd) stems its dated
+    # artifact from the local date, and `composite.load_us_exposure_posture`
+    # globs `exposure_posture_<local as_of>*`; a UTC stem left a 00:00–03:00
+    # local run unable to see the posture it had just written. `now` (UTC)
+    # still stamps generated_at and the freshness math; only the filename
+    # stem follows the local calendar. promote_pulse_latest reads the stamp
+    # as UTC — a ≤3 h skew against its 6-day bound, the same every other
+    # producer already carries.
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     # A pinned-clock replay must never enter live-latest ordering: newest-
     # file selectors glob exposure_posture_* and sort, so a wall-clock-named
     # replay produced today would masquerade as the current decision
