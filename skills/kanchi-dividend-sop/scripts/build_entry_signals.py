@@ -26,6 +26,17 @@ from verdict import build_run_context, synthesize_verdict
 # one symbol per request below.
 FMP_BASE_URL = "https://financialmodelingprep.com/stable"
 
+# Canonical transport (repo root `fmp_compat.py`): dual-key failover on
+# rate-limit signals + typed misses. Standalone installs (the .skill archive
+# does not bundle it) keep the thin raw /stable GET below (WPP-20260906-004).
+_SKILL_ROOT = str(Path(__file__).resolve().parents[3])
+if _SKILL_ROOT not in sys.path:
+    sys.path.insert(0, _SKILL_ROOT)
+try:
+    from fmp_compat import fmp_get_typed, key_override, request_count
+except ImportError:  # standalone install
+    fmp_get_typed = None
+
 
 def parse_ticker_csv(raw: str) -> list[str]:
     tickers: list[str] = []
@@ -121,10 +132,30 @@ class FMPClient:
         self.api_calls = 0
 
     def _get(self, endpoint: str, params: dict[str, Any] | None = None) -> Any | None:
-        # The API key is sent via header (not query string) so it never appears
-        # in a URL — including any URL embedded in a raised exception message.
         query = dict(params or {})
         url = f"{FMP_BASE_URL}/{endpoint}"
+        if fmp_get_typed is not None:
+            override = self.api_key if self.api_key != os.environ.get("FMP_API_KEY") else None
+            before = request_count()
+            with key_override(override):
+                data, reason = fmp_get_typed(
+                    url, query, timeout=self.timeout, max_retries_per_key=2
+                )
+            self.api_calls += request_count() - before
+            if reason is not None:
+                print(f"WARNING: FMP request failed ({reason}) for {endpoint}", file=sys.stderr)
+                return None
+            if self.sleep_seconds > 0:
+                time.sleep(self.sleep_seconds)
+            return data
+        return self._raw_get(url, endpoint, query)
+
+    def _raw_get(self, url: str, endpoint: str, query: dict[str, Any]) -> Any | None:
+        """Standalone fallback (no fmp_compat): one key, no failover.
+
+        The API key is sent via header (not query string) so it never appears
+        in a URL — including any URL embedded in a raised exception message.
+        """
         headers = {"apikey": self.api_key}
         attempts = 0
 
