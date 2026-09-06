@@ -40,10 +40,11 @@ if str(SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(SKILL_ROOT))
 
 try:
-    from fmp_compat import fmp_get, key_override
+    from fmp_compat import fmp_get, key_override, request_count
 except ImportError:  # standalone .skill install without the repo-root module
     fmp_get = None
     key_override = None
+    request_count = None
     print(
         "NOTE: fmp_compat not importable — FMP calls go direct to /stable; "
         "dual-key failover unavailable.",
@@ -189,13 +190,17 @@ class FMPClient:
     def _get(self, url: str, params: dict[str, Any]) -> Any | None:
         if self.api_calls >= self.max_api_calls:
             return None
-        self.api_calls += 1
         if fmp_get is not None:
+            # fmp_get may retry and fail over keys: charge every HTTP attempt
+            # it actually made against the budget, never a flat 1 per call.
+            before = request_count() if request_count is not None else None
             try:
                 with key_override(self.api_key):
                     return fmp_get(url, params=params, timeout=30)
             finally:
+                self.api_calls += max(1, request_count() - before) if before is not None else 1
                 time.sleep(0.3)
+        self.api_calls += 1
         try:
             resp = self.session.get(url, params=params, timeout=30)
             time.sleep(0.3)

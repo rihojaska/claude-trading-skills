@@ -80,7 +80,10 @@ def fetch_price_data(ticker: str, start_date: str, end_date: str, api_key: str) 
             if isinstance(data, dict) and "historical" in data:
                 historical = data["historical"]
             elif isinstance(data, list):
-                historical = [row for row in data if isinstance(row, dict)]
+                if all(isinstance(row, dict) and "date" in row for row in data):
+                    historical = data
+                else:
+                    print(f"Warning: {ticker}: malformed EOD payload (non-dict or date-less row) — refusing the whole series (standalone path, WPP-20260902-002)", file=sys.stderr)
             if historical is not None:
                 return {item["date"]: item["close"] for item in historical}
     except Exception:  # nosec B112 - defensive, matches prior behaviour

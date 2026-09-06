@@ -162,10 +162,11 @@ def _fetch_raw_historical(symbol, api_key, params=None):
     if isinstance(data, dict) and "historical" in data:
         return data
     if isinstance(data, list):
-        # Raw /stable flat-list shape.
-        rows = [row for row in data if isinstance(row, dict)]
-        if rows:
-            return {"symbol": symbol, "historical": rows}
+        # Raw /stable flat-list shape — accepted whole or refused whole.
+        if data and all(isinstance(row, dict) and "date" in row for row in data):
+            return {"symbol": symbol, "historical": data}
+        if data:
+            print(f"{symbol}: malformed EOD payload (non-dict or date-less row) — refusing the whole series (standalone path, WPP-20260902-002)", file=sys.stderr)
     return None
 
 

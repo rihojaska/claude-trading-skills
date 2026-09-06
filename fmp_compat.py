@@ -369,6 +369,17 @@ def _looks_like_quota_error(response: requests.Response) -> bool:
     return False
 
 
+_REQUESTS_MADE = 0
+
+
+def request_count() -> int:
+    """Total HTTP attempts fmp_get has made in this process (every retry and
+    every key-failover attempt counts). Budgeted callers charge the DELTA
+    around one fmp_get call instead of assuming one request per call
+    (codex nested gate 2026-09-06 P2, WPP-20260901-016)."""
+    return _REQUESTS_MADE
+
+
 def fmp_get(
     path: str,
     params: dict | None = None,
@@ -412,6 +423,8 @@ def fmp_get(
         call_params["apikey"] = key
 
         for attempt in range(max_retries_per_key):
+            global _REQUESTS_MADE
+            _REQUESTS_MADE += 1
             try:
                 r = _original_get(url, params=call_params, timeout=timeout)
             except requests.RequestException:
