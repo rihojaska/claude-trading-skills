@@ -92,6 +92,50 @@ def test_budget_charges_the_request_delta(relpath, name, counter, monkeypatch):
     assert getattr(client, counter) == 2
 
 
+def test_max_attempts_bounds_the_transport(monkeypatch, capsys):
+    calls = {"n": 0}
+
+    def always_flaky(url, params=None, timeout=None):
+        calls["n"] += 1
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(fmp_compat, "_original_get", always_flaky)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k1", "k2"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
+    assert fmp_compat.fmp_get("/stable/profile", {"symbol": "AAPL"}, max_attempts=1) is None
+    assert calls["n"] == 1
+    assert "attempt budget (1) exhausted" in capsys.readouterr().err
+    calls["n"] = 0
+    assert fmp_compat.fmp_get("/stable/profile", {"symbol": "AAPL"}) is None  # unbounded: 2 keys x 2 retries
+    assert calls["n"] == 4
+
+
+@pytest.mark.parametrize(
+    "relpath, name, counter",
+    [
+        ("stockbee-20pct-study/scripts/run_20pct_study.py", "run_20pct_study_cap", "api_calls_made"),
+        ("stockbee-episodic-pivot-analyzer/scripts/analyze_ep.py", "analyze_ep_cap", "api_calls"),
+    ],
+)
+def test_budget_cap_is_never_exceeded_through_the_real_transport(relpath, name, counter, monkeypatch):
+    mod = _load(relpath, name)
+    calls = {"n": 0}
+
+    def always_flaky(url, params=None, timeout=None):
+        calls["n"] += 1
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(fmp_compat, "_original_get", always_flaky)
+    monkeypatch.setattr(fmp_compat, "get_fmp_keys", lambda: ["k1", "k2"])
+    monkeypatch.setattr(fmp_compat.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(mod, "fmp_get", fmp_compat.fmp_get)
+    monkeypatch.setattr(mod, "request_count", fmp_compat.request_count)
+    client = mod.FMPClient(api_key="k", max_api_calls=1)
+    client._get("https://financialmodelingprep.com/stable/profile", {"symbol": "AAPL"}, **({"quiet": True} if "quiet" in mod.FMPClient._get.__code__.co_varnames else {}))
+    assert calls["n"] == 1 and getattr(client, counter) == 1  # cap honoured mid-retry
+
+
 # ── 2. standalone paths refuse malformed lists whole ─────────────────────────
 
 MALFORMED = [{"date": "2026-09-04", "close": 1.0}, "junk", {"close": 2.0}]

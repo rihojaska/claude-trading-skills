@@ -386,9 +386,16 @@ def fmp_get(
     *,
     timeout: int = 15,
     max_retries_per_key: int = 2,
+    max_attempts: int | None = None,
 ) -> Any | None:
     """
     GET an FMP endpoint with automatic key failover.
+
+    `max_attempts` bounds the TOTAL HTTP attempts this call may make across
+    retries and key failover (None = unbounded, the historical behaviour).
+    Budgeted callers pass their remaining API-call budget so one fmp_get can
+    never overrun an explicit cap mid-retry (codex nested gate r2 P2,
+    2026-09-06); when the bound is hit the call returns None.
 
     Tries primary key first; on rate-limit signals, swaps to fallback key.
     Returns parsed JSON (list or dict), or None on unrecoverable failure.
@@ -418,11 +425,19 @@ def fmp_get(
     base_params = _prepare_params_for_url(url, params)
     historical_limit = base_params.pop("_tm_limit", None)
 
+    attempts_this_call = 0
     for key_idx, key in enumerate(keys):
         call_params = dict(base_params)
         call_params["apikey"] = key
 
         for attempt in range(max_retries_per_key):
+            if max_attempts is not None and attempts_this_call >= max_attempts:
+                print(
+                    f"fmp_compat: attempt budget ({max_attempts}) exhausted for {url} — giving up",
+                    file=sys.stderr,
+                )
+                return None
+            attempts_this_call += 1
             global _REQUESTS_MADE
             _REQUESTS_MADE += 1
             try:

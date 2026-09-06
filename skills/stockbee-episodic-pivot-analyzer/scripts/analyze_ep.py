@@ -196,7 +196,9 @@ class FMPClient:
             before = request_count() if request_count is not None else None
             try:
                 with key_override(self.api_key):
-                    return fmp_get(url, params=params, timeout=30)
+                    # Bound retries/failover by the remaining budget (cap-safe).
+                    return fmp_get(url, params=params, timeout=30,
+                                   max_attempts=self.max_api_calls - self.api_calls)
             finally:
                 self.api_calls += max(1, request_count() - before) if before is not None else 1
                 time.sleep(0.3)
