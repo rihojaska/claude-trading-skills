@@ -122,6 +122,9 @@ _V3_TO_STABLE = {
     "/api/v3/analyst-estimates/([^?]+)": "/stable/analyst-estimates?symbol=\\1",
     "/api/v3/institutional_holder/([^?]+)": "/stable/institutional-ownership/list?symbol=\\1",
     "/api/v3/institutional-holder/([^?]+)": "/stable/institutional-ownership/list?symbol=\\1",
+    # etf-holder is path-style on v3 and query-style on stable; the naive
+    # `/api/v3/` -> `/stable/` catch-all would mangle it (WPP-20260901-016).
+    "/api/v3/etf-holder/([^?]+)": "/stable/etf/holdings?symbol=\\1",
 }
 
 
@@ -204,9 +207,22 @@ def _normalize_eod_flat_list(data: Any, symbol: str | None, limit: int | None = 
     norm_target = symbol.replace("-", ".") if symbol else None
     matched_symbol = None
     historical = []
-    for row in data:
+    for index, row in enumerate(data):
         if not isinstance(row, dict) or "date" not in row:
-            continue
+            # Fail CLOSED (WPP-20260902-002): a 200-OK payload carrying a
+            # non-dict or date-less element is corrupt evidence. Dropping the
+            # element and returning the survivors would hand every fmp_get
+            # history consumer a silently SHORTENED series that still looks
+            # complete — laundered evidence (P5). Refuse the whole series;
+            # callers treat None exactly like an empty/failed fetch (the
+            # market-top client falls through to its yfinance rung).
+            shape = "date-less dict" if isinstance(row, dict) else type(row).__name__
+            print(
+                f"fmp_compat: EOD payload for {symbol or '?'} malformed at index "
+                f"{index} ({shape}) — refusing the whole series",
+                file=sys.stderr,
+            )
+            return None
         row_symbol = row.get("symbol") or symbol
         if norm_target and row_symbol and row_symbol.replace("-", ".") != norm_target:
             continue
