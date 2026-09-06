@@ -116,6 +116,44 @@ def _yf_quote_profile(symbol: str) -> Optional[dict]:
     }
 
 
+def _yf_price_history(symbol: str, days: int = 30) -> list[dict]:
+    """Daily closes from yfinance in the FMP historical-price-eod row shape:
+    ``{"date", "close", "data_source": "yfinance"}``, most-recent-first, at most
+    ``days`` rows.
+
+    Free-tier leg for ``get_historical_prices``: /stable/historical-price-eod/full
+    is symbol-whitelist gated (402 on nearly every non-US name), which left the
+    dividend screeners RSI-blind — every candidate died on "Insufficient price
+    data" and every monthly run reported 0 qualified (WPP-20260906-007,
+    2026-09-06). Raw closes (auto_adjust=False) to match FMP's ``close``; RSI is
+    scale-invariant, so pence-quoted LSE lines need no fold here. Fail-closed:
+    ``[]`` on ImportError / fetch error / empty frame / no positive closes —
+    never a synthetic or padded series.
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        return []
+    start = (datetime.now().date() - timedelta(days=days * 2 + 10)).isoformat()
+    try:
+        hist = yf.Ticker(symbol).history(start=start, interval="1d", auto_adjust=False)
+    except Exception:
+        return []
+    if hist is None or getattr(hist, "empty", True) or "Close" not in hist.columns:
+        return []
+    rows: list[dict] = []
+    for idx, close in hist["Close"].items():
+        try:
+            value = float(close)
+        except (TypeError, ValueError):
+            continue
+        if value != value or value <= 0:  # NaN / non-positive bar
+            continue
+        rows.append({"date": idx.date().isoformat(), "close": value, "data_source": "yfinance"})
+    rows.sort(key=lambda r: r["date"], reverse=True)
+    return rows[:days]
+
+
 def _valid_ratio(value: Any) -> Optional[float]:
     """A P/E or P/B that can feed a verdict: finite and > 0, else None.
 
@@ -423,6 +461,11 @@ class FMPClient:
                 self._record_endpoint_failure(base_url)
             except Exception:
                 self._record_endpoint_failure(base_url)
+        # Every FMP rung missed (free-tier 402 / breaker-disabled): yfinance
+        # leg, same row shape, fail-closed (WPP-20260906-007).
+        yf_rows = _yf_price_history(symbol, days)
+        if yf_rows:
+            return yf_rows
         return None
 
     def _record_endpoint_failure(self, base_url: str) -> None:

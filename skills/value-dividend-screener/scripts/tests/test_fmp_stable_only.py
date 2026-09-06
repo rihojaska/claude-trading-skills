@@ -149,6 +149,15 @@ class TestAdapter:
 
 
 @pytest.fixture(autouse=True)
+def _no_yfinance_price_leg(monkeypatch):
+    """These pins cover the FMP transport rung only. Since WPP-20260906-007 a
+    total FMP miss falls through to the yfinance price leg (pinned in
+    test_yf_price_history_fallback.py); stub it so the transport pins stay
+    hermetic and keep asserting the FMP-side empty contract."""
+    monkeypatch.setattr(mod, "_yf_price_history", lambda *_a, **_k: [])
+
+
+@pytest.fixture(autouse=True)
 def _isolate_fmp_env(monkeypatch):
     """A house credential is always present in production (fmp_compat self-loads
     it at import), so the caller-key tests below need a known ambient baseline
