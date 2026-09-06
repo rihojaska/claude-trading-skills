@@ -77,9 +77,15 @@ def fetch_price_data(ticker: str, start_date: str, end_date: str, api_key: str) 
         if resp.status_code == 200:
             data = resp.json()
             historical = None
+            if isinstance(data, dict) and "historicalStockList" in data:
+                # Legacy batch shape (standalone path): exact symbol match only.
+                norm = ticker.replace("-", ".")
+                matches = [e for e in data.get("historicalStockList") or [] if isinstance(e, dict)
+                           and str(e.get("symbol") or "").replace("-", ".") == norm]
+                data = matches[0].get("historical") if matches else None
             if isinstance(data, dict) and "historical" in data:
-                historical = data["historical"]
-            elif isinstance(data, list):
+                data = data["historical"]
+            if isinstance(data, list):
                 if all(isinstance(row, dict) and "date" in row for row in data):
                     historical = data
                 else:

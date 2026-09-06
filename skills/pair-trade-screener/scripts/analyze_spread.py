@@ -94,8 +94,15 @@ def _fetch_raw_historical(symbol, api_key, params=None):
         data = resp.json()
     except requests.exceptions.RequestException:
         return None
+    if isinstance(data, dict) and "historicalStockList" in data:
+        # Legacy batch shape (standalone path; the shared shim folds this in
+        # fmp_compat._normalize_historical_stock_list): exact symbol match only.
+        norm = symbol.replace("-", ".")
+        matches = [e for e in data.get("historicalStockList") or [] if isinstance(e, dict)
+                   and str(e.get("symbol") or "").replace("-", ".") == norm]
+        data = matches[0].get("historical") if matches else None
     if isinstance(data, dict) and "historical" in data:
-        return data
+        data = data["historical"]
     if isinstance(data, list):
         if data and all(isinstance(row, dict) and "date" in row for row in data):
             return {"symbol": symbol, "historical": data}

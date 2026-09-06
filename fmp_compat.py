@@ -206,14 +206,19 @@ def _normalize_historical_stock_list(data: dict, symbol: str | None, limit: int 
     a wrong symbol's series must never be served as the requested one).
     """
     entries = data.get("historicalStockList")
-    if not isinstance(entries, list):
+    if not isinstance(entries, list) or not symbol:
+        # No requested symbol → nothing can be matched exactly → refuse
+        # (codex nested gate r4 P1: never serve an unidentified series).
+        print(f"fmp_compat: historicalStockList needs a requested symbol to match — refusing", file=sys.stderr)
         return None
-    norm_target = symbol.replace("-", ".") if symbol else None
+    norm_target = symbol.replace("-", ".")
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         entry_symbol = entry.get("symbol")
-        if norm_target and entry_symbol and str(entry_symbol).replace("-", ".") != norm_target:
+        # EXACT normalized match only — a symbol-less or foreign entry is never
+        # the requested security (codex nested gate r4 P1).
+        if not entry_symbol or str(entry_symbol).replace("-", ".") != norm_target:
             continue
         historical = entry.get("historical")
         if not isinstance(historical, list) or not all(isinstance(r, dict) and "date" in r for r in historical):

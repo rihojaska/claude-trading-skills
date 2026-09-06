@@ -166,7 +166,7 @@ def test_downtrends_standalone_refuses_whole(monkeypatch, capsys):
     mod = _load("downtrend-duration-analyzer/scripts/analyze_downtrends.py", "analyze_downtrends_p2")
     monkeypatch.setattr(mod, "fmp_get", None, raising=False)
     monkeypatch.setattr(mod.requests, "get", lambda *a, **k: _Resp(200, MALFORMED))
-    out = mod.fetch_historical_prices("AAPL", "k", "2026-08-01", "2026-09-04")
+    out = mod.fetch_historical_prices("k", "AAPL", "2026-08-01", "2026-09-04")  # (api_key, symbol, from, to)
     assert out is None or len(out) == 0
     assert "refusing the whole series" in capsys.readouterr().err
 
@@ -177,3 +177,62 @@ def test_postmortem_standalone_refuses_whole(monkeypatch, capsys):
     monkeypatch.setattr(mod.requests, "get", lambda *a, **k: _Resp(200, MALFORMED))
     assert mod.fetch_price_data("AAPL", "2026-08-01", "2026-09-04", "k") == {}
     assert "refusing the whole series" in capsys.readouterr().err
+
+
+# ── 3. historicalStockList: exact symbol match everywhere (nested gate r4) ────
+
+STOCK_LIST = {"historicalStockList": [
+    {"historical": [{"date": "2026-09-04", "close": 99.0}]},               # symbol-less: never matches
+    {"symbol": "MSFT", "historical": [{"date": "2026-09-04", "close": 9.0}]},
+    {"symbol": "AAPL", "historical": CLEAN},
+]}
+
+
+def test_shim_fold_requires_an_exact_symbol(capsys):
+    assert fmp_compat._normalize_historical_stock_list(STOCK_LIST, "AAPL") == {"symbol": "AAPL", "historical": CLEAN}
+    assert fmp_compat._normalize_historical_stock_list(STOCK_LIST, "NVDA") is None
+    assert fmp_compat._normalize_historical_stock_list(STOCK_LIST, None) is None
+    assert fmp_compat._normalize_historical_stock_list({"historicalStockList": [{"historical": CLEAN}]}, "AAPL") is None
+    assert "refusing" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "relpath, name",
+    [
+        ("pair-trade-screener/scripts/find_pairs.py", "find_pairs_sl"),
+        ("pair-trade-screener/scripts/analyze_spread.py", "analyze_spread_sl"),
+    ],
+)
+def test_pair_screener_standalone_folds_stock_list_exactly(relpath, name, monkeypatch):
+    try:
+        mod = _load(relpath, name)
+    except ModuleNotFoundError as e:
+        pytest.skip(f"pre-existing import gap: {e}")
+    monkeypatch.setattr(mod, "fmp_get", None, raising=False)
+    monkeypatch.setattr(mod.requests, "get", lambda *a, **k: _Resp(200, STOCK_LIST))
+    assert mod._fetch_raw_historical("AAPL", "k") == {"symbol": "AAPL", "historical": CLEAN}
+    assert mod._fetch_raw_historical("NVDA", "k") is None
+
+
+def test_downtrends_and_postmortem_fold_stock_list_exactly(monkeypatch):
+    dt = _load("downtrend-duration-analyzer/scripts/analyze_downtrends.py", "analyze_downtrends_sl")
+    monkeypatch.setattr(dt, "fmp_get", None, raising=False)
+    ohlcv = [{**r, "open": 1.0, "high": 1.0, "low": 1.0, "volume": 1} for r in CLEAN]
+    ohlcv_list = {"historicalStockList": [{"historical": ohlcv}, {"symbol": "AAPL", "historical": ohlcv}]}
+    monkeypatch.setattr(dt.requests, "get", lambda *a, **k: _Resp(200, ohlcv_list))
+    assert len(dt.fetch_historical_prices("k", "AAPL", "2026-08-01", "2026-09-04")) == 2  # (api_key, symbol, ...)
+    nvda = dt.fetch_historical_prices("k", "NVDA", "2026-08-01", "2026-09-04")
+    assert nvda is None or len(nvda) == 0
+    pm = _load("signal-postmortem/scripts/postmortem_recorder.py", "postmortem_recorder_sl")
+    monkeypatch.setattr(pm, "fmp_get", None, raising=False)
+    monkeypatch.setattr(pm.requests, "get", lambda *a, **k: _Resp(200, STOCK_LIST))
+    assert pm.fetch_price_data("AAPL", "2026-08-01", "2026-09-04", "k") == {"2026-09-04": 1.0, "2026-09-03": 2.0}
+    assert pm.fetch_price_data("NVDA", "2026-08-01", "2026-09-04", "k") == {}
+
+
+def test_price_adapter_extracts_stock_list_exactly():
+    mod = _load("trader-memory-core/scripts/fmp_price_adapter.py", "fmp_price_adapter_sl")
+    cls = next(v for v in vars(mod).values() if isinstance(v, type) and hasattr(v, "_extract_historical"))
+    assert cls._extract_historical(STOCK_LIST, "AAPL") == CLEAN
+    assert cls._extract_historical(STOCK_LIST, "NVDA") == []
+    assert cls._extract_historical({"historicalStockList": [{"historical": CLEAN}]}, "AAPL") == []

@@ -111,4 +111,13 @@ class FMPPriceAdapter:
             ]
         if not isinstance(data, dict):
             return []
+        if "historicalStockList" in data:
+            # Legacy batch shape (standalone path; the shared shim folds it in
+            # fmp_compat): EXACT normalized symbol match only, never a
+            # symbol-less entry (codex nested gate r4).
+            norm = ticker.replace("-", ".")
+            for entry in data.get("historicalStockList") or []:
+                if isinstance(entry, dict) and str(entry.get("symbol") or "").replace("-", ".") == norm:
+                    return entry.get("historical") or []
+            return []
         return data.get("historical") or []
