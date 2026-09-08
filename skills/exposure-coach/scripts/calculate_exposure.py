@@ -8,6 +8,7 @@ exposure ceiling, bias direction, and action recommendation.
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -910,7 +911,9 @@ def main():
     parser.add_argument(
         "--as-of",
         help="Pin the freshness-evaluation clock (ISO date/datetime, assumed "
-        "UTC) — required for deterministic historical replays; default: now",
+        "UTC) — required for deterministic historical replays of a PAST cycle; "
+        "today or later is refused (WPP-20260907-001). Never pass it on the "
+        "live fire. Default: now",
     )
     parser.add_argument(
         "--output-dir",
@@ -937,6 +940,31 @@ def main():
             parser.error(f"--as-of: not an ISO date/datetime: {args.as_of!r}")
         if args_now.tzinfo is None:
             args_now = args_now.replace(tzinfo=timezone.utc)
+        # `--as-of` replays a PAST cycle under the `exposure_replay_` stem. A
+        # pinned date on today's (or a later) LOCAL calendar day — the calendar
+        # the `exposure_posture_` stem and the composite's glob share — is not a
+        # replay: the 2026-09-07 live fire passed `--as-of "$(date +%F)"`, wrote
+        # a replay stem the composite never reads, and dropped the US region
+        # (WPP-20260907-001). Refuse before any input is loaded; write nothing.
+        # A date-only value is the calendar day the operator typed: compare it
+        # literally. Shifting its assumed-UTC midnight into local time would
+        # read `--as-of "$(date +%F)"` as YESTERDAY on any host west of UTC and
+        # let today's live cycle through (codex gate r1 P1). A datetime carries
+        # an instant, so it converts.
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", args.as_of.strip()):
+            pinned_local = args_now.date()
+        else:
+            pinned_local = args_now.astimezone().date()
+        today_local = datetime.now().date()
+        if pinned_local >= today_local:
+            parser.error(
+                f"--as-of {args.as_of!r} names today's or a future cycle "
+                f"(local date {pinned_local.isoformat()}, today "
+                f"{today_local.isoformat()}). --as-of is for historical "
+                "replays of a PAST cycle only; the live fire runs WITHOUT "
+                "--as-of, because the composite reads exposure_posture_<today>* "
+                "and a replay stem is invisible to it (WPP-20260907-001)."
+            )
     else:
         args_now = datetime.now(timezone.utc)
 
